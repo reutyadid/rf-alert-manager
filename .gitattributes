@@ -1,0 +1,4 @@
+# Force LF line endings: scripts, cloud-init and compose files run on Linux (VM, containers, CI)
+* text=auto eol=lf
+*.png binary
+*.jpg binary

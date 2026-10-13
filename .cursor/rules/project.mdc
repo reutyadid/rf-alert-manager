@@ -1,0 +1,16 @@
+---
+description: Project rules shared with Claude Code
+alwaysApply: true
+---
+
+This project's rules, architecture and domain spec are in `CLAUDE.md` at the repo root.
+Design decisions and their reasoning are in `DECISIONS.md`. Follow both; do not contradict
+a decision without saying so explicitly.
+
+Key rules:
+- `domain/` is pure Python: no fastapi, pydantic, sqlalchemy, redis imports, no `datetime.now()`.
+- Lifecycle decisions use observation event time and the watermark, never arrival time.
+- "Same signal" is decided only by `compute_signal_key()`.
+- No secrets in code, compose files or workflows. Configuration via environment variables.
+
+Claude Code may be editing files at the same time. Only edit the file I am asking about.

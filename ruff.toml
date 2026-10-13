@@ -1,0 +1,9 @@
+line-length = 100
+target-version = "py312"
+
+[lint]
+# E/F: errors, I: import order, B: bugbear, UP: modern syntax, DTZ: no naive datetimes
+select = ["E", "F", "I", "B", "UP", "DTZ"]
+
+[lint.per-file-ignores]
+"**/tests/**" = ["DTZ"]
