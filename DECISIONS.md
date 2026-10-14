@@ -7,6 +7,11 @@ during implementation.
 
 ## 1. Stack
 
+### Python 3.12
+Matches the `python:3.12-slim` base image, so local runs, CI and containers use the same
+version. The newest releases were avoided because packages with C extensions (e.g. `asyncpg`,
+`pydantic-core`) may not yet ship wheels for them.
+
 ### Framework: FastAPI + Pydantic
 Built-in request validation (the task is validation-heavy), async I/O for the broker and
 DB, and auto-generated OpenAPI docs. Pydantic is confined to the API layer; business logic
@@ -132,7 +137,10 @@ missing rules on each startup was rejected because it resurrects rules deleted t
   the task, but an out-of-range coordinate is clearly invalid).
 - **Batch: partial acceptance.** Valid items are stored, invalid items are returned with index
   and reason. One faulty reading should not drop a whole batch from a healthy sensor.
-  [TODO: confirm and note the HTTP status code used]
+- **Status codes:** a batch with at least one accepted item returns **200** with `accepted`
+  and `rejected` in the body; a batch where every item is invalid returns **422**. A single
+  invalid observation returns 422. **207 Multi-Status** was rejected: it is WebDAV-specific
+  and less widely understood by clients, and the body already carries the per-item outcome.
 
 ---
 
@@ -162,7 +170,8 @@ make them inevitable.
   inbound ports needed).
 - **Security:** a self-hosted runner on a public repo lets a malicious PR run code on the VM.
   PR CI runs on GitHub-hosted runners; only the deploy job on `push` to `main` uses the
-  self-hosted runner. [TODO: private repo?]
+  self-hosted runner. The repository is **private**, so outside contributors cannot open PRs
+  that reach the runner; reviewers are given read access at submission.
 - Image tagging (commit SHA), deploy, smoke test.
 - Rollback: `workflow_dispatch` with an image tag input.
 - Secrets handling.
