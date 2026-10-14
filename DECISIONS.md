@@ -50,6 +50,33 @@ broker client.
 - Rule parameters are copied into each event, so alert-service never reads the rules table and
   the services stay decoupled. Events carry `schema_version` for safe evolution.
 
+### 3.1 How I read "one ingests observations and evaluates rules; a second receives and manages alerts"
+
+The sentence does not say which service checks `min_duration_s`. I split rule evaluation:
+
+- **ingest-service** does the stateless part: for each observation it checks whether the
+  frequency is inside a rule's band and the power is above `threshold_dbm`. On a match it
+  publishes a `rule_match` event. It does not decide that an alert exists.
+- **alert-service** does everything time-based: persistence (`min_duration_s`, `max_gap_s`),
+  opening the alert, dedup, ack/resolve, and auto-resolve. All of it uses event time and
+  one watermark.
+
+**Alternative considered: ingest sends only confirmed alerts.**
+I rejected it because:
+1. After an alert opens, every match still has to update it (last_seen, occurrences, peak
+   power, sensors). So the only traffic saved is short bursts that never open an alert.
+2. A manual resolve means a new match must start a new alert. Ingest would need to learn
+   about ack/resolve, which adds two-way coupling between the services.
+3. Time logic would be split: opening in ingest, auto-resolve in alert-service. Both would
+   need a watermark and late-event handling.
+4. Ingest would hold pending runs in memory, so it could not run as several replicas
+   behind nginx. Ingest is the service that takes the full sensor load.
+5. Alert details must include the contributing observations from before the alert opened,
+   so ingest would have to send the whole run anyway.
+
+**Trade-off I accepted:** every matching observation goes through the broker, including
+short bursts that never become alerts.
+
 ---
 
 ## 4. Alert logic
@@ -135,12 +162,19 @@ missing rules on each startup was rejected because it resurrects rules deleted t
 
 - Validation per the task, plus `lat` in [-90, 90] and `lon` in [-180, 180] (not specified in
   the task, but an out-of-range coordinate is clearly invalid).
-- **Batch: partial acceptance.** Valid items are stored, invalid items are returned with index
-  and reason. One faulty reading should not drop a whole batch from a healthy sensor.
-- **Status codes:** a batch with at least one accepted item returns **200** with `accepted`
-  and `rejected` in the body; a batch where every item is invalid returns **422**. A single
-  invalid observation returns 422. **207 Multi-Status** was rejected: it is WebDAV-specific
-  and less widely understood by clients, and the body already carries the per-item outcome.
+- **Batch: all or nothing.** If any item is invalid, the whole batch is rejected and nothing
+  is stored. An invalid item usually points to a problem in the sensor itself (calibration,
+  firmware or serialization), so the other readings in the same batch are suspect too.
+  It also keeps storage simple: one transaction, no half-stored batches.
+- **Status codes:** a fully valid batch returns **200** with the `accepted` count. A batch
+  with any invalid item returns **422** and lists **every** invalid item with index and
+  reason, so the sensor can fix all of them in one round. A single invalid observation
+  returns 422. Duplicates are not errors: they are skipped as in §7.
+- **Alternative considered: partial acceptance** (store valid items, reject invalid ones).
+  Rejected because it stores readings from a sensor that is likely misbehaving.
+- **Trade-off:** one bad reading drops valid readings in the same batch, possibly including a
+  real emitter. The sensor must fix or drop a rejected batch; retrying it unchanged fails
+  every time. Resending a fixed batch is safe because duplicates are ignored (§7).
 
 ---
 

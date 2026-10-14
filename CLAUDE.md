@@ -58,8 +58,9 @@ Each service:
 ### Observation validation
 - All fields required. `frequency_mhz` in [1, 6000], `bandwidth_khz` > 0,
   `power_dbm` in [-150, 30], `timestamp` ISO-8601 UTC, `lat` in [-90, 90], `lon` in [-180, 180].
-- Batch: accept valid items, reject invalid ones; response lists accepted count and
-  rejected items with index and reason.
+- Batch: all or nothing. If any item is invalid, reject the whole batch and store nothing
+  (422, listing every invalid item with index and reason). A valid batch returns 200 with
+  the accepted count.
 - Duplicates: unique on `(sensor_id, timestamp, frequency_mhz)`; duplicates are skipped
   (`ON CONFLICT DO NOTHING`) and NOT republished.
 
