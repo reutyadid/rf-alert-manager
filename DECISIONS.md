@@ -47,8 +47,12 @@ broker client.
   rule independently and publishes a `rule_match` event per match.
 - **alert-service is stateful:** all time-dependent decisions (min duration, dedup,
   auto-resolve) live in one place.
-- Rule parameters are copied into each event, so alert-service never reads the rules table and
-  the services stay decoupled. Events carry `schema_version` for safe evolution.
+- **Rule ownership:** ingest-service owns the rules table and all `/api/v1/rules` endpoints.
+  Rule parameters are copied into each event (values at evaluation time, with `max_gap_s`
+  already defaulted), so alert-service never reads the rules table and never applies defaults.
+  The services stay decoupled.
+- **Versioning deferred:** the event contract (see CLAUDE.md) is fixed for this task and has no
+  `schema_version`. With more time, add one so consumers can reject unknown shapes.
 
 ### 3.1 How I read "one ingests observations and evaluates rules; a second receives and manages alerts"
 
@@ -146,6 +150,12 @@ direction).
 ### 4.7 Rule changes while a run is pending
 New parameters apply from the next matching event onward (they travel in each event).
 
+**Disabled or deleted rule:** ingest simply stops publishing matches for it. Its open alerts
+auto-resolve through the normal `resolve_after_s` path. No control message is sent between
+the services.
+- **Trade-off:** an alert of a deleted rule stays OPEN for up to `resolve_after_s` (plus the
+  allowed lateness) after the last match.
+
 ---
 
 ## 5. Rules: YAML is a seed, the database is the source of truth
@@ -162,6 +172,11 @@ missing rules on each startup was rejected because it resurrects rules deleted t
 
 - Validation per the task, plus `lat` in [-90, 90] and `lon` in [-180, 180] (not specified in
   the task, but an out-of-range coordinate is clearly invalid).
+- Timestamps with any UTC offset (e.g. `+03:00`) are accepted and converted to UTC: it is
+  the same instant, and rejecting it gains nothing. Naive timestamps (no offset) are rejected
+  because the instant is ambiguous.
+- Sensor `last_seen` is the latest **event time** reported by the sensor (`GREATEST`), not the
+  arrival time, consistent with the rest of the system. A delayed batch does not move it backwards.
 - **Batch: all or nothing.** If any item is invalid, the whole batch is rejected and nothing
   is stored. An invalid item usually points to a problem in the sensor itself (calibration,
   firmware or serialization), so the other readings in the same batch are suspect too.
@@ -188,6 +203,26 @@ make them inevitable.
 - Together: at-least-once delivery with an idempotent consumer. Two different sensors
   reporting the same frequency at the same second are not duplicates.
 
+### 7.1 Publish order and deterministic observation_id
+Per request: validate → BEGIN → `INSERT … ON CONFLICT DO NOTHING RETURNING` (new rows only)
+→ upsert sensors → evaluate → `XADD` (one pipeline) → COMMIT.
+- **Redis fails:** the transaction rolls back and the client gets 503. A retry stores and
+  publishes cleanly.
+- **XADD succeeded but COMMIT failed** (or the process crashed between them): events exist
+  for rows that were not stored. The retry stores the rows and publishes again, but with the
+  **same** `observation_id`, so alert-service skips the repeat. At-least-once delivery with an
+  idempotent consumer, no outbox table.
+- `observation_id = uuid5(namespace, "sensor_id|timestamp|frequency")` over canonical inputs:
+  timestamp as UTC `YYYY-MM-DDTHH:MM:SS[.ffffff]Z`, frequency rounded to 6 decimals and
+  formatted `.6f`. The frequency is stored rounded the same way, so the DB unique key and the
+  id always agree. Equivalent inputs (`Z` / `+00:00` / another offset at the same instant,
+  `2437` / `2437.0`) give the same id.
+- **Alternative rejected: commit, then publish.** If Redis fails after the commit, the events
+  are lost for good: the retry sees only duplicates, which are never republished.
+- **Alternative rejected: transactional outbox.** It closes the gap fully, but adds a table and
+  a relay process; the deterministic id already makes the remaining case harmless.
+- **Cost:** the DB transaction stays open for one Redis round-trip (about 1 ms on the same host).
+
 ---
 
 ## 8. Containers and VM [TODO]
@@ -213,3 +248,5 @@ make them inevitable.
 ## 10. Not production-ready [TODO]
 
 ## 11. What I would improve with more time [TODO]
+
+- Add `schema_version` to the `rule_match` event so consumers can reject unknown shapes (§3).
