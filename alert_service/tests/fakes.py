@@ -67,7 +67,7 @@ class InMemoryAlertRepository:
             stored.resolved_at = at
         return dataclasses.replace(stored)
 
-    async def list(self, flt: AlertFilter) -> list[Alert]:
+    async def query(self, flt: AlertFilter) -> list[Alert]:
         result = []
         for a in self.alerts.values():
             if flt.state and a.state is not flt.state:
