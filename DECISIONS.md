@@ -202,6 +202,22 @@ make them inevitable.
 - Together: at-least-once delivery with an idempotent consumer. Two different sensors
   reporting the same frequency at the same second are not duplicates.
 
+### 7.1 Phantom events on the alert side
+Ingest publishes before its COMMIT (ingest docs/adr/0001), so in rare cases a `rule_match`
+reaches alert-service for an observation whose commit then failed.
+- **alert-service does not check for this.** It never reads ingest's tables (§3). An alert
+  keeps its own copy of every contributing observation (`alert_observations`), so alert
+  details still work and nothing throws.
+- **Why no `verified` flag:** a lookup at open time would almost always find the row (the
+  commit finishes milliseconds after publishing, before the event is consumed). It would also
+  tie alert-service to ingest's schema and to a shared database. The observation in a phantom
+  event was valid. When the sensor retries, ingest stores it and publishes it again with the
+  same deterministic `observation_id`; alert-service skips it as a duplicate, so it is not
+  counted twice.
+- **Visibility:** ingest counts phantom events in a metric, so their rate is measurable.
+- **With more time:** a transactional outbox in ingest (events written in the same
+  transaction and published by a relay after commit) removes phantom events completely.
+
 ---
 
 ## 8. Containers and VM [TODO]
