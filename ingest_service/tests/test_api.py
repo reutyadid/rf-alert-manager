@@ -9,7 +9,6 @@ from ingest_service.domain.rules import RuleService
 from ingest_service.tests.builders import a_rule, observation_json, rule_json
 from ingest_service.tests.fakes import (
     FakeObservationReader,
-    FakePublisher,
     FakeRuleRepository,
     FakeSensorReader,
     FakeStore,
@@ -19,7 +18,7 @@ from ingest_service.tests.fakes import (
 class Env:
     def __init__(self, max_batch_size: int = 1000) -> None:
         self.store = FakeStore()
-        self.publisher = FakePublisher()
+        self.publisher = self.store.publisher
         self.rules = FakeRuleRepository([a_rule()])
         self.healthy = {"database": True, "redis": True}
 
@@ -31,7 +30,7 @@ class Env:
             return _check
 
         services = Services(
-            ingest=IngestService(self.rules, self.store.uow, self.publisher, default_max_gap_s=3),
+            ingest=IngestService(self.rules, self.store.uow, default_max_gap_s=3),
             rules=RuleService(self.rules),
             observations=FakeObservationReader(self.store),
             sensors=FakeSensorReader(self.store),

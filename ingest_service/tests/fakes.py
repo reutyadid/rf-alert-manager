@@ -9,12 +9,18 @@ from ingest_service.domain.models import Observation, ObservationQuery, Rule, Se
 
 
 class FakeStore:
-    """Committed state shared by the fake unit of work and the readers."""
+    """Committed state shared by the fake unit of work and the readers.
+
+    Failure switches simulate each step of uow.commit() failing.
+    """
 
     def __init__(self) -> None:
         self.observations: dict[str, Observation] = {}
         self.sensors: dict[str, datetime] = {}
+        self.publisher = FakePublisher()
+        self.fail_between_publish_and_commit = False
         self.fail_on_commit = False
+        self.fail_after_commit = False
         self.commits = 0
 
     def uow(self) -> FakeUnitOfWork:
@@ -22,26 +28,22 @@ class FakeStore:
 
 
 class FakeUnitOfWork:
-    """Stages writes and applies them only when the block exits without an error."""
+    """Stages writes; commit() publishes staged events, then applies the writes."""
 
     def __init__(self, store: FakeStore) -> None:
         self._store = store
         self._observations: dict[str, Observation] = {}
         self._sensors: dict[str, datetime] = {}
+        self._events: list[dict] = []
+        self.published = False
+        self.committed = False
+        self.stage: str | None = None
 
     async def __aenter__(self) -> FakeUnitOfWork:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        if exc_type is not None:
-            return  # rollback: drop staged writes
-        if self._store.fail_on_commit:
-            raise DependencyUnavailable("commit failed")
-        self._store.observations.update(self._observations)
-        for sensor_id, ts in self._sensors.items():
-            current = self._store.sensors.get(sensor_id)
-            self._store.sensors[sensor_id] = ts if current is None else max(current, ts)
-        self._store.commits += 1
+        pass  # not committed = staged writes are simply dropped (rollback)
 
     async def insert_observations(self, observations: list[Observation]) -> list[Observation]:
         inserted = []
@@ -58,21 +60,55 @@ class FakeUnitOfWork:
             current = self._sensors.get(sensor_id)
             self._sensors[sensor_id] = ts if current is None else max(current, ts)
 
+    def add_events(self, events: list[dict]) -> None:
+        self._events.extend(events)
+
+    async def commit(self) -> None:
+        self.stage = "publish"
+        if self._events:
+            publisher = self._store.publisher
+            publisher.commit_in_progress = True
+            try:
+                await publisher.publish(list(self._events))
+            finally:
+                publisher.commit_in_progress = False
+            self.published = True
+        if self._store.fail_between_publish_and_commit:
+            self.stage = "after_publish"
+            raise RuntimeError("simulated failure between publish and commit")
+        self.stage = "commit"
+        if self._store.fail_on_commit:
+            raise DependencyUnavailable("commit failed")
+        self._store.observations.update(self._observations)
+        for sensor_id, ts in self._sensors.items():
+            current = self._store.sensors.get(sensor_id)
+            self._store.sensors[sensor_id] = ts if current is None else max(current, ts)
+        self._store.commits += 1
+        self.committed = True
+        self.stage = None
+        if self._store.fail_after_commit:
+            raise RuntimeError("simulated failure after a successful commit")
+
 
 class FakeMetrics:
     def __init__(self) -> None:
-        self.phantom_rule_ids: list[str] = []
+        self.candidate_rule_ids: list[str] = []
 
-    def phantom_events(self, rule_ids: list[str]) -> None:
-        self.phantom_rule_ids.extend(rule_ids)
+    def phantom_candidates(self, rule_ids: list[str]) -> None:
+        self.candidate_rule_ids.extend(rule_ids)
 
 
 class FakePublisher:
+    """Refuses to publish unless called from uow.commit(), so the order cannot be bypassed."""
+
     def __init__(self) -> None:
         self.events: list[dict] = []
         self.fail = False
+        self.commit_in_progress = False
 
     async def publish(self, events: list[dict]) -> None:
+        if not self.commit_in_progress:
+            raise AssertionError("publish called outside uow.commit()")
         if self.fail:
             raise DependencyUnavailable("redis down")
         self.events.extend(events)

@@ -17,7 +17,7 @@ from redis.asyncio import Redis
 
 from ingest_service.adapters import postgres, redis_publisher
 from ingest_service.main import Settings, build_app
-from ingest_service.tests.builders import a_rule, observation_json, rule_json
+from ingest_service.tests.builders import a_rule, an_observation, observation_json, rule_json
 
 DB_URL = os.environ.get("INGEST_IT_DATABASE_URL")
 REDIS_URL = os.environ.get("INGEST_IT_REDIS_URL")
@@ -131,3 +131,57 @@ def test_redis_down_rolls_back(client, monkeypatch):
     assert r.status_code == 503
     assert asyncio.run(_count("SELECT count(*) FROM observations")) == 0
     assert asyncio.run(_count("SELECT count(*) FROM sensors")) == 0
+
+
+class _RecordingPublisher:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    async def publish(self, events: list[dict]) -> None:
+        self.events.extend(events)
+
+
+class _CommitFailsOnNetwork:
+    """Wraps an asyncpg transaction so COMMIT fails like a dropped connection."""
+
+    def __init__(self, tx) -> None:
+        self._tx = tx
+
+    async def commit(self) -> None:
+        raise ConnectionResetError("simulated network error during COMMIT")
+
+    async def rollback(self) -> None:
+        await self._tx.rollback()
+
+
+def test_postgres_uow_state_flags():
+    async def scenario() -> None:
+        await _reset()
+        pool = await asyncpg.create_pool(DB_URL)
+        await postgres.init_schema(pool)
+        publisher = _RecordingPublisher()
+        obs = an_observation()
+
+        # COMMIT fails after a successful publish: published, not committed, nothing stored.
+        uow = postgres.PostgresUnitOfWork(pool, publisher)
+        with pytest.raises(redis_publisher.DependencyUnavailable):
+            async with uow:
+                await uow.insert_observations([obs])
+                uow.add_events([{"observation_id": obs.observation_id}])
+                uow._tx = _CommitFailsOnNetwork(uow._tx)
+                await uow.commit()
+        assert (uow.published, uow.committed, uow.stage) == (True, False, "commit")
+        assert await pool.fetchval("SELECT count(*) FROM observations") == 0
+
+        # Happy path: both flags set, row stored.
+        uow = postgres.PostgresUnitOfWork(pool, publisher)
+        async with uow:
+            await uow.insert_observations([obs])
+            uow.add_events([{"observation_id": obs.observation_id}])
+            await uow.commit()
+        assert (uow.published, uow.committed, uow.stage) == (True, True, None)
+        assert await pool.fetchval("SELECT count(*) FROM observations") == 1
+        assert len(publisher.events) == 2
+        await pool.close()
+
+    asyncio.run(scenario())

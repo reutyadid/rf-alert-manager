@@ -13,7 +13,19 @@ from ingest_service.domain.models import Observation, ObservationQuery, Rule, Se
 
 
 class IngestUnitOfWork(Protocol):
-    """One database transaction. Commits when the block exits cleanly, rolls back otherwise."""
+    """One database transaction plus the events to publish with it (docs/adr/0001).
+
+    The caller must call commit(); leaving the block without a successful commit rolls back.
+    State flags let the caller tell what happened, whichever line raised:
+      published  True only after XADD returned successfully
+      committed  True only after COMMIT returned successfully
+      stage      the step of commit() in progress or failed ("publish", "commit", ...);
+                 None before commit() and after it succeeds
+    """
+
+    published: bool
+    committed: bool
+    stage: str | None
 
     async def __aenter__(self) -> Self: ...
 
@@ -27,19 +39,32 @@ class IngestUnitOfWork(Protocol):
         """last_seen = max(existing, given) per sensor."""
         ...
 
+    def add_events(self, events: list[dict]) -> None:
+        """Stage rule_match events. They are published only by commit()."""
+        ...
+
+    async def commit(self) -> None:
+        """Final steps, in this order and nothing in between: publish staged events, COMMIT."""
+        ...
+
 
 UnitOfWorkFactory = Callable[[], IngestUnitOfWork]
 
 
 class EventPublisher(Protocol):
+    """Used by the unit of work's commit(), never by domain services directly."""
+
     async def publish(self, events: list[dict]) -> None:
         """Append all events to the rule_matches stream. Raises if any could not be sent."""
         ...
 
 
 class MetricsPort(Protocol):
-    def phantom_events(self, rule_ids: list[str]) -> None:
-        """Events were published but the commit failed (docs/adr/0001). One rule_id per event."""
+    def phantom_candidates(self, rule_ids: list[str]) -> None:
+        """Events were published but their transaction did not commit. One rule_id per event.
+
+        An upper bound on phantoms: a client retry (same uuid5) makes most of them harmless.
+        """
         ...
 
 

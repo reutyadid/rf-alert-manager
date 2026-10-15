@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 from datetime import timedelta
 
@@ -7,15 +8,15 @@ import pytest
 from ingest_service.domain.errors import DependencyUnavailable
 from ingest_service.domain.ingest import IngestService
 from ingest_service.tests.builders import T0, a_rule, an_observation
-from ingest_service.tests.fakes import FakeMetrics, FakePublisher, FakeRuleRepository, FakeStore
+from ingest_service.tests.fakes import FakeMetrics, FakeRuleRepository, FakeStore
 
 
 def make_service(rules=None):
     store = FakeStore()
-    publisher = FakePublisher()
+    metrics = FakeMetrics()
     repo = FakeRuleRepository([a_rule()] if rules is None else rules)
-    service = IngestService(repo, store.uow, publisher, default_max_gap_s=3.0)
-    return service, store, publisher
+    service = IngestService(repo, store.uow, default_max_gap_s=3.0, metrics=metrics)
+    return service, store, store.publisher, metrics
 
 
 def ingest(service, observations):
@@ -23,7 +24,7 @@ def ingest(service, observations):
 
 
 def test_stores_and_publishes_matching_observation():
-    service, store, publisher = make_service()
+    service, store, publisher, _ = make_service()
     obs = an_observation()
 
     result = ingest(service, [obs])
@@ -34,7 +35,7 @@ def test_stores_and_publishes_matching_observation():
 
 
 def test_non_matching_observation_is_stored_but_not_published():
-    service, store, publisher = make_service()
+    service, store, publisher, _ = make_service()
 
     result = ingest(service, [an_observation(power_dbm=-90.0)])
 
@@ -44,7 +45,7 @@ def test_non_matching_observation_is_stored_but_not_published():
 
 
 def test_duplicates_are_skipped_and_not_republished():
-    service, store, publisher = make_service()
+    service, _, publisher, _ = make_service()
     ingest(service, [an_observation()])
 
     result = ingest(service, [an_observation(), an_observation(sensor_id="sensor-04")])
@@ -55,7 +56,7 @@ def test_duplicates_are_skipped_and_not_republished():
 
 
 def test_duplicate_inside_one_batch_is_published_once():
-    service, _, publisher = make_service()
+    service, _, publisher, _ = make_service()
 
     result = ingest(service, [an_observation(), an_observation()])
 
@@ -64,7 +65,7 @@ def test_duplicate_inside_one_batch_is_published_once():
 
 
 def test_one_event_per_matching_rule():
-    service, _, publisher = make_service([a_rule(), a_rule(rule_id="second")])
+    service, _, publisher, _ = make_service([a_rule(), a_rule(rule_id="second")])
 
     ingest(service, [an_observation()])
 
@@ -72,26 +73,15 @@ def test_one_event_per_matching_rule():
 
 
 def test_disabled_rule_produces_no_events():
-    service, _, publisher = make_service([a_rule(enabled=False)])
+    service, _, publisher, _ = make_service([a_rule(enabled=False)])
 
     ingest(service, [an_observation()])
 
     assert publisher.events == []
 
 
-def test_publish_failure_stores_nothing():
-    service, store, publisher = make_service()
-    publisher.fail = True
-
-    with pytest.raises(DependencyUnavailable):
-        ingest(service, [an_observation()])
-
-    assert store.observations == {}
-    assert store.sensors == {}
-
-
 def test_retry_after_failed_commit_publishes_same_observation_id():
-    service, store, publisher = make_service()
+    service, store, publisher, _ = make_service()
     store.fail_on_commit = True
     with pytest.raises(DependencyUnavailable):
         ingest(service, [an_observation()])
@@ -106,7 +96,7 @@ def test_retry_after_failed_commit_publishes_same_observation_id():
 
 
 def test_sensor_last_seen_is_max_event_time():
-    service, store, _ = make_service()
+    service, store, _, _ = make_service()
     later = T0 + timedelta(seconds=10)
 
     ingest(service, [an_observation(timestamp=later), an_observation(timestamp=T0)])
@@ -116,7 +106,7 @@ def test_sensor_last_seen_is_max_event_time():
 
 
 def test_empty_batch_is_a_noop():
-    service, store, publisher = make_service()
+    service, store, publisher, _ = make_service()
 
     result = ingest(service, [])
 
@@ -124,58 +114,86 @@ def test_empty_batch_is_a_noop():
     assert store.commits == 0
 
 
-# --- phantom events: XADD succeeded, then COMMIT failed (docs/adr/0001) ----
+# --- phantom candidates: published, then not committed (docs/adr/0001) ---------
 
 
-def make_measured_service(rules=None):
-    store = FakeStore()
-    publisher = FakePublisher()
-    metrics = FakeMetrics()
-    repo = FakeRuleRepository([a_rule()] if rules is None else rules)
-    service = IngestService(repo, store.uow, publisher, default_max_gap_s=3.0, metrics=metrics)
-    return service, store, publisher, metrics
-
-
-def test_commit_failure_after_publish_counts_phantoms_and_reraises(caplog):
-    service, store, publisher, metrics = make_measured_service([a_rule(), a_rule(rule_id="second")])
+def test_commit_failure_after_publish_is_a_candidate_and_reraises(caplog):
+    service, store, publisher, metrics = make_service([a_rule(), a_rule(rule_id="second")])
     store.fail_on_commit = True
 
-    with caplog.at_level(logging.ERROR), pytest.raises(DependencyUnavailable):
+    with caplog.at_level(logging.WARNING), pytest.raises(DependencyUnavailable):
         ingest(service, [an_observation()])
 
-    assert sorted(metrics.phantom_rule_ids) == ["rule-ism-high-power", "second"]
+    assert sorted(metrics.candidate_rule_ids) == ["rule-ism-high-power", "second"]
     assert len(publisher.events) == 2
-    record = next(r for r in caplog.records if "phantom" in r.getMessage())
+    record = next(r for r in caplog.records if "phantom candidates" in r.getMessage())
+    assert record.levelno == logging.WARNING
     assert record.published_events == 2
     assert record.observation_ids == [an_observation().observation_id]
     assert record.error_type == "DependencyUnavailable"
+    assert record.failed_stage == "commit"
 
 
-def test_publish_failure_is_not_a_phantom():
-    service, store, publisher, metrics = make_measured_service()
-    publisher.fail = True
+def test_failure_between_publish_and_commit_is_a_candidate(caplog):
+    service, store, _, metrics = make_service()
+    store.fail_between_publish_and_commit = True
+
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError):
+        ingest(service, [an_observation()])
+
+    assert metrics.candidate_rule_ids == ["rule-ism-high-power"]
+    assert store.observations == {}
+    record = next(r for r in caplog.records if "phantom candidates" in r.getMessage())
+    assert record.failed_stage == "after_publish"
+    assert record.error_type == "RuntimeError"
+
+
+def test_failure_after_successful_commit_is_not_a_candidate():
+    service, store, _, metrics = make_service()
+    store.fail_after_commit = True
+
+    with pytest.raises(RuntimeError):
+        ingest(service, [an_observation()])
+
+    assert metrics.candidate_rule_ids == []
+    assert len(store.observations) == 1  # everything was stored
+
+
+def test_publish_failure_is_not_a_candidate():
+    service, store, _, metrics = make_service()
+    store.publisher.fail = True
 
     with pytest.raises(DependencyUnavailable):
         ingest(service, [an_observation()])
 
-    assert metrics.phantom_rule_ids == []
+    assert metrics.candidate_rule_ids == []
     assert store.observations == {}
+    assert store.sensors == {}
 
 
-def test_commit_failure_without_published_events_is_not_a_phantom():
-    service, store, _, metrics = make_measured_service()
+def test_commit_failure_without_events_is_not_a_candidate():
+    service, store, _, metrics = make_service()
     store.fail_on_commit = True
 
     with pytest.raises(DependencyUnavailable):
         ingest(service, [an_observation(power_dbm=-90.0)])  # matches no rule
 
-    assert metrics.phantom_rule_ids == []
+    assert metrics.candidate_rule_ids == []
 
 
-def test_happy_path_is_not_a_phantom():
-    service, _, publisher, metrics = make_measured_service()
+def test_happy_path_is_not_a_candidate():
+    service, _, publisher, metrics = make_service()
 
     ingest(service, [an_observation()])
 
     assert len(publisher.events) == 1
-    assert metrics.phantom_rule_ids == []
+    assert metrics.candidate_rule_ids == []
+
+
+def test_service_cannot_publish_outside_uow_commit():
+    # The service has no publisher at all; events reach the broker only through uow.commit().
+    assert "publisher" not in inspect.signature(IngestService).parameters
+    # And the fake publisher refuses any call that does not come from commit().
+    store = FakeStore()
+    with pytest.raises(AssertionError, match="outside uow.commit"):
+        asyncio.run(store.publisher.publish([{"rule_id": "x"}]))

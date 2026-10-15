@@ -18,6 +18,7 @@ from ingest_service.domain.models import (
     Rule,
     Sensor,
 )
+from ingest_service.domain.ports import EventPublisher
 
 # Errors where the client should retry later (503), as opposed to a bug in a query (500):
 # the database is unreachable, or the transaction lost a deadlock/serialization conflict.
@@ -79,12 +80,21 @@ ON CONFLICT (sensor_id) DO UPDATE SET last_seen = GREATEST(sensors.last_seen, EX
 
 
 class PostgresUnitOfWork:
-    """One transaction on one pooled connection. Commit on clean exit, rollback otherwise."""
+    """One transaction on one pooled connection, plus the events to publish with it.
 
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    commit() publishes the staged events and then commits, as its final steps
+    (docs/adr/0001). Leaving the block without a successful commit() rolls back.
+    """
+
+    def __init__(self, pool: asyncpg.Pool, publisher: EventPublisher) -> None:
         self._pool = pool
+        self._publisher = publisher
         self._conn: asyncpg.Connection | None = None
         self._tx = None
+        self._events: list[dict] = []
+        self.published = False
+        self.committed = False
+        self.stage: str | None = None
 
     @_unavailable_on_retryable_error
     async def __aenter__(self) -> Self:
@@ -99,16 +109,34 @@ class PostgresUnitOfWork:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         try:
-            if exc_type is None:
-                await self._tx.commit()
-            else:
-                await self._tx.rollback()
-        except RETRYABLE_ERRORS as err:
-            if exc_type is None:
-                raise DependencyUnavailable(f"database commit: {err}") from err
-            # Rolling back after another error: keep the original error.
+            if not self.committed:
+                try:
+                    await self._tx.rollback()
+                except Exception:
+                    # Rolling back after another error (e.g. a failed COMMIT left the
+                    # transaction unusable): keep the original error.
+                    if exc_type is None:
+                        raise
         finally:
             await self._pool.release(self._conn)
+
+    def add_events(self, events: list[dict]) -> None:
+        self._events.extend(events)
+
+    async def commit(self) -> None:
+        """XADD the staged events, then COMMIT. Nothing else runs between the two."""
+        self.stage = "publish"
+        if self._events:
+            await self._publisher.publish(self._events)  # raises DependencyUnavailable
+            self.published = True
+        self.stage = "commit"
+        try:
+            await self._tx.commit()
+        except RETRYABLE_ERRORS as err:
+            # On a network error the outcome is ambiguous: the server may have committed.
+            raise DependencyUnavailable(f"database commit: {err}") from err
+        self.committed = True
+        self.stage = None
 
     @_unavailable_on_retryable_error
     async def insert_observations(self, observations: list[Observation]) -> list[Observation]:

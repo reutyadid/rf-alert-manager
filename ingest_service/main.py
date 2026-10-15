@@ -92,11 +92,11 @@ async def lifespan(app: FastAPI):
         rules = RuleService(rule_repo)
         await seed_rules(rules, settings.rules_file)
 
+        publisher = redis_publisher.RedisStreamPublisher(redis)
         app.state.services = Services(
             ingest=IngestService(
                 rule_repo,
-                lambda: postgres.PostgresUnitOfWork(pool),
-                redis_publisher.RedisStreamPublisher(redis),
+                lambda: postgres.PostgresUnitOfWork(pool, publisher),
                 default_max_gap_s=settings.default_max_gap_s,
                 metrics=PrometheusMetrics(),
             ),
