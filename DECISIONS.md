@@ -217,6 +217,8 @@ make them inevitable.
   reporting the same frequency at the same second are not duplicates.
 
 ### 7.1 Publish order and deterministic observation_id
+Full record, known gap and how it is measured: [ADR 0001](docs/adr/0001-publish-before-commit.md).
+
 Per request: validate → BEGIN → `INSERT … ON CONFLICT DO NOTHING RETURNING` (new rows only)
 → upsert sensors → evaluate → `XADD` (one pipeline) → COMMIT.
 - **Redis fails:** the transaction rolls back and the client gets 503. A retry stores and

@@ -20,6 +20,7 @@ from redis.asyncio import Redis
 
 from ingest_service.adapters import postgres, redis_publisher
 from ingest_service.adapters.log_config import configure_logging
+from ingest_service.adapters.prometheus_metrics import PrometheusMetrics
 from ingest_service.adapters.rules_yaml import read_rules_file
 from ingest_service.api.app import Services, create_app
 from ingest_service.api.observations import DEFAULT_MAX_BATCH_SIZE
@@ -97,6 +98,7 @@ async def lifespan(app: FastAPI):
                 lambda: postgres.PostgresUnitOfWork(pool),
                 redis_publisher.RedisStreamPublisher(redis),
                 default_max_gap_s=settings.default_max_gap_s,
+                metrics=PrometheusMetrics(),
             ),
             rules=rules,
             observations=postgres.PostgresObservationReader(pool),

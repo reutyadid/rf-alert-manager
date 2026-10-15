@@ -59,6 +59,14 @@ class FakeUnitOfWork:
             self._sensors[sensor_id] = ts if current is None else max(current, ts)
 
 
+class FakeMetrics:
+    def __init__(self) -> None:
+        self.phantom_rule_ids: list[str] = []
+
+    def phantom_events(self, rule_ids: list[str]) -> None:
+        self.phantom_rule_ids.extend(rule_ids)
+
+
 class FakePublisher:
     def __init__(self) -> None:
         self.events: list[dict] = []

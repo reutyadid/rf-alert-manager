@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import timedelta
 
 import pytest
@@ -6,7 +7,7 @@ import pytest
 from ingest_service.domain.errors import DependencyUnavailable
 from ingest_service.domain.ingest import IngestService
 from ingest_service.tests.builders import T0, a_rule, an_observation
-from ingest_service.tests.fakes import FakePublisher, FakeRuleRepository, FakeStore
+from ingest_service.tests.fakes import FakeMetrics, FakePublisher, FakeRuleRepository, FakeStore
 
 
 def make_service(rules=None):
@@ -121,3 +122,60 @@ def test_empty_batch_is_a_noop():
 
     assert (result.accepted, result.duplicates, result.published) == (0, 0, 0)
     assert store.commits == 0
+
+
+# --- phantom events: XADD succeeded, then COMMIT failed (docs/adr/0001) ----
+
+
+def make_measured_service(rules=None):
+    store = FakeStore()
+    publisher = FakePublisher()
+    metrics = FakeMetrics()
+    repo = FakeRuleRepository([a_rule()] if rules is None else rules)
+    service = IngestService(repo, store.uow, publisher, default_max_gap_s=3.0, metrics=metrics)
+    return service, store, publisher, metrics
+
+
+def test_commit_failure_after_publish_counts_phantoms_and_reraises(caplog):
+    service, store, publisher, metrics = make_measured_service([a_rule(), a_rule(rule_id="second")])
+    store.fail_on_commit = True
+
+    with caplog.at_level(logging.ERROR), pytest.raises(DependencyUnavailable):
+        ingest(service, [an_observation()])
+
+    assert sorted(metrics.phantom_rule_ids) == ["rule-ism-high-power", "second"]
+    assert len(publisher.events) == 2
+    record = next(r for r in caplog.records if "phantom" in r.getMessage())
+    assert record.published_events == 2
+    assert record.observation_ids == [an_observation().observation_id]
+    assert record.error_type == "DependencyUnavailable"
+
+
+def test_publish_failure_is_not_a_phantom():
+    service, store, publisher, metrics = make_measured_service()
+    publisher.fail = True
+
+    with pytest.raises(DependencyUnavailable):
+        ingest(service, [an_observation()])
+
+    assert metrics.phantom_rule_ids == []
+    assert store.observations == {}
+
+
+def test_commit_failure_without_published_events_is_not_a_phantom():
+    service, store, _, metrics = make_measured_service()
+    store.fail_on_commit = True
+
+    with pytest.raises(DependencyUnavailable):
+        ingest(service, [an_observation(power_dbm=-90.0)])  # matches no rule
+
+    assert metrics.phantom_rule_ids == []
+
+
+def test_happy_path_is_not_a_phantom():
+    service, _, publisher, metrics = make_measured_service()
+
+    ingest(service, [an_observation()])
+
+    assert len(publisher.events) == 1
+    assert metrics.phantom_rule_ids == []

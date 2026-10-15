@@ -37,6 +37,12 @@ class EventPublisher(Protocol):
         ...
 
 
+class MetricsPort(Protocol):
+    def phantom_events(self, rule_ids: list[str]) -> None:
+        """Events were published but the commit failed (docs/adr/0001). One rule_id per event."""
+        ...
+
+
 class RuleRepository(Protocol):
     async def list(self) -> list[Rule]: ...
 
