@@ -202,7 +202,7 @@ make them inevitable.
 - Together: at-least-once delivery with an idempotent consumer. Two different sensors
   reporting the same frequency at the same second are not duplicates.
 
-### 7.1 Phantom events on the alert side
+### 7.2 Phantom events on the alert side
 Ingest publishes before its COMMIT (ingest docs/adr/0001), so in rare cases a `rule_match`
 reaches alert-service for an observation whose commit then failed.
 - **alert-service does not check for this.** It never reads ingest's tables (§3). An alert
