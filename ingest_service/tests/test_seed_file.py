@@ -1,9 +1,13 @@
+import asyncio
+
 import pytest
 
 from ingest_service.adapters.rules_yaml import read_rules_file
 from ingest_service.api.schemas import RuleIn
 from ingest_service.domain.evaluators import is_known_rule_type
-from ingest_service.main import DEFAULT_RULES_FILE
+from ingest_service.domain.rules import RuleService
+from ingest_service.main import DEFAULT_RULES_FILE, seed_rules
+from ingest_service.tests.fakes import FakeRuleRepository
 
 
 def test_shipped_seed_file_is_valid():
@@ -23,3 +27,16 @@ def test_bad_shape_rejected(tmp_path):
     path.write_text("rules: just-a-string\n")
     with pytest.raises(ValueError):
         read_rules_file(path)
+
+
+def test_missing_rules_file_fails_startup(tmp_path):
+    repo = FakeRuleRepository()
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(seed_rules(RuleService(repo), tmp_path / "missing.yaml"))
+    assert repo.rules == {}
+
+
+def test_seed_rules_from_shipped_file():
+    repo = FakeRuleRepository()
+    asyncio.run(seed_rules(RuleService(repo), DEFAULT_RULES_FILE))
+    assert "rule-ism-high-power" in repo.rules

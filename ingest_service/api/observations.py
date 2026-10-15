@@ -14,8 +14,12 @@ from ingest_service.domain.models import Observation, ObservationQuery
 
 router = APIRouter(prefix="/api/v1/observations", tags=["observations"])
 
+DEFAULT_MAX_BATCH_SIZE = 1000
 
-def parse_observations(payload: Any) -> list[Observation]:
+
+def parse_observations(
+    payload: Any, max_batch_size: int = DEFAULT_MAX_BATCH_SIZE
+) -> list[Observation]:
     """Validate a single observation or a batch. Raises ApiError listing every invalid item."""
     if isinstance(payload, dict):
         items = [payload]
@@ -23,6 +27,12 @@ def parse_observations(payload: Any) -> list[Observation]:
         items = payload
     else:
         raise ApiError(422, "validation_error", "body must be an observation or an array of them")
+    if len(items) > max_batch_size:
+        raise ApiError(
+            413,
+            "batch_too_large",
+            f"batch has {len(items)} observations; the maximum is {max_batch_size}",
+        )
 
     observations: list[Observation] = []
     details: list[dict] = []
@@ -52,7 +62,7 @@ def parse_observations(payload: Any) -> list[Observation]:
 @router.post("", response_model=IngestResponse)
 async def post_observations(request: Request, payload: Annotated[Any, Body()]) -> IngestResponse:
     try:
-        observations = parse_observations(payload)
+        observations = parse_observations(payload, request.app.state.max_batch_size)
     except ApiError:
         metrics.BATCHES_REJECTED.inc()
         raise
@@ -73,6 +83,13 @@ async def get_observations(
     end: Annotated[IsoTimestamp | None, Query(alias="to")] = None,
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
 ) -> list[ObservationOut]:
+    invalid = []
+    if None not in (min_frequency_mhz, max_frequency_mhz) and min_frequency_mhz > max_frequency_mhz:
+        invalid.append({"field": "min_frequency_mhz", "reason": "must be <= max_frequency_mhz"})
+    if None not in (start, end) and start > end:
+        invalid.append({"field": "from", "reason": "must be <= to"})
+    if invalid:
+        raise ApiError(422, "validation_error", "request is invalid", invalid)
     query = ObservationQuery(
         sensor_id=sensor_id,
         min_frequency_mhz=min_frequency_mhz,

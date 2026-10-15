@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from ingest_service.api import metrics
 from ingest_service.api.errors import install_error_handlers
+from ingest_service.api.observations import DEFAULT_MAX_BATCH_SIZE
 from ingest_service.api.observations import router as observations_router
 from ingest_service.api.rules import router as rules_router
 from ingest_service.api.schemas import SensorOut
@@ -31,8 +32,13 @@ class Services:
     health_checks: dict[str, HealthCheck]
 
 
-def create_app(services: Services | None = None, lifespan=None) -> FastAPI:
+def create_app(
+    services: Services | None = None,
+    lifespan=None,
+    max_batch_size: int = DEFAULT_MAX_BATCH_SIZE,
+) -> FastAPI:
     app = FastAPI(title="RF ingest-service", version="1.0.0", lifespan=lifespan)
+    app.state.max_batch_size = max_batch_size
     if services is not None:
         app.state.services = services
 

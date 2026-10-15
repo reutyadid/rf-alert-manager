@@ -19,31 +19,34 @@ from ingest_service.domain.models import (
     Sensor,
 )
 
-# Errors that mean "the database is unreachable", as opposed to a bug in a query.
-CONNECTION_ERRORS = (
+# Errors where the client should retry later (503), as opposed to a bug in a query (500):
+# the database is unreachable, or the transaction lost a deadlock/serialization conflict.
+RETRYABLE_ERRORS = (
     OSError,
     TimeoutError,
     asyncpg.InterfaceError,
     asyncpg.PostgresConnectionError,
     asyncpg.CannotConnectNowError,
     asyncpg.TooManyConnectionsError,
+    asyncpg.DeadlockDetectedError,
+    asyncpg.SerializationError,
 )
 
 SCHEMA_LOCK_ID = 7_316_001  # pg_advisory lock so concurrent replicas do not race on DDL
 
 
-def _unavailable_on_connection_error(fn):
+def _unavailable_on_retryable_error(fn):
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
         try:
             return await fn(*args, **kwargs)
-        except CONNECTION_ERRORS as exc:
+        except RETRYABLE_ERRORS as exc:
             raise DependencyUnavailable(f"database: {exc}") from exc
 
     return wrapper
 
 
-@_unavailable_on_connection_error
+@_unavailable_on_retryable_error
 async def init_schema(pool: asyncpg.Pool) -> None:
     sql = resources.files("ingest_service.adapters").joinpath("schema.sql").read_text()
     async with pool.acquire() as conn, conn.transaction():
@@ -51,7 +54,7 @@ async def init_schema(pool: asyncpg.Pool) -> None:
         await conn.execute(sql)
 
 
-@_unavailable_on_connection_error
+@_unavailable_on_retryable_error
 async def ping(pool: asyncpg.Pool) -> None:
     await pool.fetchval("SELECT 1")
 
@@ -83,7 +86,7 @@ class PostgresUnitOfWork:
         self._conn: asyncpg.Connection | None = None
         self._tx = None
 
-    @_unavailable_on_connection_error
+    @_unavailable_on_retryable_error
     async def __aenter__(self) -> Self:
         self._conn = await self._pool.acquire()
         try:
@@ -100,25 +103,28 @@ class PostgresUnitOfWork:
                 await self._tx.commit()
             else:
                 await self._tx.rollback()
-        except CONNECTION_ERRORS as err:
+        except RETRYABLE_ERRORS as err:
             if exc_type is None:
                 raise DependencyUnavailable(f"database commit: {err}") from err
             # Rolling back after another error: keep the original error.
         finally:
             await self._pool.release(self._conn)
 
-    @_unavailable_on_connection_error
+    @_unavailable_on_retryable_error
     async def insert_observations(self, observations: list[Observation]) -> list[Observation]:
+        # Fixed key order: two overlapping batches take unique-index locks in the same order,
+        # so they wait for each other instead of deadlocking.
+        ordered = sorted(observations, key=lambda o: (o.sensor_id, o.timestamp, o.frequency_mhz))
         rows = await self._conn.fetch(
             _INSERT_OBSERVATIONS,
-            [o.observation_id for o in observations],
-            [o.sensor_id for o in observations],
-            [o.timestamp for o in observations],
-            [o.frequency_mhz for o in observations],
-            [o.bandwidth_khz for o in observations],
-            [o.power_dbm for o in observations],
-            [o.location.lat for o in observations],
-            [o.location.lon for o in observations],
+            [o.observation_id for o in ordered],
+            [o.sensor_id for o in ordered],
+            [o.timestamp for o in ordered],
+            [o.frequency_mhz for o in ordered],
+            [o.bandwidth_khz for o in ordered],
+            [o.power_dbm for o in ordered],
+            [o.location.lat for o in ordered],
+            [o.location.lon for o in ordered],
         )
         inserted_ids = {str(r["id"]) for r in rows}
         inserted = []
@@ -128,7 +134,7 @@ class PostgresUnitOfWork:
                 inserted_ids.discard(obs.observation_id)
         return inserted
 
-    @_unavailable_on_connection_error
+    @_unavailable_on_retryable_error
     async def touch_sensors(self, last_seen: dict[str, datetime]) -> None:
         ordered = sorted(last_seen.items())  # fixed lock order avoids deadlocks between batches
         await self._conn.execute(_TOUCH_SENSORS, [s for s, _ in ordered], [ts for _, ts in ordered])
@@ -141,7 +147,7 @@ class PostgresObservationReader:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
-    @_unavailable_on_connection_error
+    @_unavailable_on_retryable_error
     async def query(self, q: ObservationQuery) -> list[Observation]:
         conditions, args = [], []
 
@@ -184,7 +190,7 @@ class PostgresSensorReader:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
-    @_unavailable_on_connection_error
+    @_unavailable_on_retryable_error
     async def list(self) -> list[Sensor]:
         rows = await self._pool.fetch("SELECT sensor_id, last_seen FROM sensors ORDER BY sensor_id")
         return [Sensor(sensor_id=r["sensor_id"], last_seen=r["last_seen"]) for r in rows]
@@ -240,30 +246,30 @@ class PostgresRuleRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
-    @_unavailable_on_connection_error
+    @_unavailable_on_retryable_error
     async def list(self) -> list[Rule]:
         rows = await self._pool.fetch(f"SELECT {_RULE_COLUMNS} FROM rules ORDER BY rule_id")
         return [_rule_from_row(r) for r in rows]
 
-    @_unavailable_on_connection_error
+    @_unavailable_on_retryable_error
     async def list_enabled(self) -> list[Rule]:
         rows = await self._pool.fetch(
             f"SELECT {_RULE_COLUMNS} FROM rules WHERE enabled ORDER BY rule_id"
         )
         return [_rule_from_row(r) for r in rows]
 
-    @_unavailable_on_connection_error
+    @_unavailable_on_retryable_error
     async def get(self, rule_id: str) -> Rule | None:
         row = await self._pool.fetchrow(
             f"SELECT {_RULE_COLUMNS} FROM rules WHERE rule_id = $1", rule_id
         )
         return _rule_from_row(row) if row else None
 
-    @_unavailable_on_connection_error
+    @_unavailable_on_retryable_error
     async def create(self, rule: Rule) -> bool:
         return await self._pool.fetchval(_INSERT_RULE, *_rule_args(rule)) is not None
 
-    @_unavailable_on_connection_error
+    @_unavailable_on_retryable_error
     async def update(self, rule: Rule) -> bool:
         row = await self._pool.fetchval(
             "UPDATE rules SET name = $2, type = $3, band_min_mhz = $4, band_max_mhz = $5, "
@@ -273,7 +279,7 @@ class PostgresRuleRepository:
         )
         return row is not None
 
-    @_unavailable_on_connection_error
+    @_unavailable_on_retryable_error
     async def delete(self, rule_id: str) -> bool:
         return (
             await self._pool.fetchval(
@@ -282,7 +288,7 @@ class PostgresRuleRepository:
             is not None
         )
 
-    @_unavailable_on_connection_error
+    @_unavailable_on_retryable_error
     async def seed_if_empty(self, rules: list[Rule]) -> int:
         async with self._pool.acquire() as conn, conn.transaction():
             # Blocks concurrent writers so two replicas starting together seed at most once.

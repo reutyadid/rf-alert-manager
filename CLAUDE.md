@@ -144,7 +144,8 @@ in the composition root. `.env.example` is committed; `.env` is never committed.
 No secrets in code, compose files, images or workflow files (use GitHub Secrets).
 
 Key settings: `DATABASE_URL`, `REDIS_URL`, `RULES_FILE`, `FREQ_TOLERANCE_MHZ`,
-`DEFAULT_MAX_GAP_S`, `ALLOWED_LATENESS_S`, `IDLE_TIMEOUT_S`, `SWEEP_INTERVAL_S`, `LOG_LEVEL`.
+`DEFAULT_MAX_GAP_S`, `ALLOWED_LATENESS_S`, `IDLE_TIMEOUT_S`, `SWEEP_INTERVAL_S`, `LOG_LEVEL`,
+`MAX_BATCH_SIZE` (ingest).
 
 ## Operational conventions
 - Logs: structured JSON to stdout only. Rotation is configured in compose (json-file max-size/max-file).

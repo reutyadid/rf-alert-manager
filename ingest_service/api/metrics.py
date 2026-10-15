@@ -29,14 +29,16 @@ REQUEST_DURATION = Histogram(
 
 async def track_requests(request: Request, call_next):
     start = time.perf_counter()
-    response = await call_next(request)
-    route = request.scope.get("route")
-    # Use the route template, not the raw path, to keep label cardinality bounded.
-    path = getattr(route, "path", "unmatched")
-    REQUEST_DURATION.labels(request.method, path, str(response.status_code)).observe(
-        time.perf_counter() - start
-    )
-    return response
+    status = "500"  # an unhandled exception escapes call_next; record it as a 500
+    try:
+        response = await call_next(request)
+        status = str(response.status_code)
+        return response
+    finally:
+        route = request.scope.get("route")
+        # Use the route template, not the raw path, to keep label cardinality bounded.
+        path = getattr(route, "path", "unmatched")
+        REQUEST_DURATION.labels(request.method, path, status).observe(time.perf_counter() - start)
 
 
 def metrics_response() -> Response:

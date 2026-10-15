@@ -1,5 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
+from prometheus_client import REGISTRY
 
 from ingest_service.api.app import Services, create_app
 from ingest_service.domain.errors import DependencyUnavailable
@@ -16,7 +17,7 @@ from ingest_service.tests.fakes import (
 
 
 class Env:
-    def __init__(self) -> None:
+    def __init__(self, max_batch_size: int = 1000) -> None:
         self.store = FakeStore()
         self.publisher = FakePublisher()
         self.rules = FakeRuleRepository([a_rule()])
@@ -36,7 +37,8 @@ class Env:
             sensors=FakeSensorReader(self.store),
             health_checks={"database": check("database"), "redis": check("redis")},
         )
-        self.client = TestClient(create_app(services), raise_server_exceptions=False)
+        app = create_app(services, max_batch_size=max_batch_size)
+        self.client = TestClient(app, raise_server_exceptions=False)
 
 
 @pytest.fixture
@@ -232,3 +234,65 @@ def test_metrics(env):
     assert "ingest_observations_received_total" in text
     assert "ingest_rule_matches_published_total" in text
     assert "http_request_duration_seconds" in text
+
+
+def test_batch_over_limit_is_413_and_stores_nothing():
+    env = Env(max_batch_size=2)
+    batch = [observation_json(sensor_id=f"s{i}") for i in range(3)]
+    assert_error(env.client.post("/api/v1/observations", json=batch), 413, "batch_too_large")
+    assert env.store.observations == {}
+    assert env.client.post("/api/v1/observations", json=batch[:2]).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"min_frequency_mhz": 2500, "max_frequency_mhz": 2400},
+        {"from": "2026-10-06T11:00:00Z", "to": "2026-10-06T10:00:00Z"},
+    ],
+)
+def test_query_rejects_inverted_ranges(env, params):
+    assert_error(env.client.get("/api/v1/observations", params=params), 422, "validation_error")
+
+
+def test_health_503_when_database_down(env):
+    env.healthy["database"] = False
+    r = env.client.get("/health")
+    assert r.status_code == 503
+    assert r.json()["checks"] == {"database": "unavailable", "redis": "ok"}
+
+
+def _sample(name: str, labels: dict | None = None) -> float:
+    return REGISTRY.get_sample_value(name, labels or {}) or 0.0
+
+
+def test_metrics_counters_increase(env):
+    before = {
+        "received": _sample("ingest_observations_received_total"),
+        "duplicate": _sample("ingest_observations_duplicate_total"),
+        "published": _sample("ingest_rule_matches_published_total"),
+        "rejected": _sample("ingest_batches_rejected_total"),
+    }
+    batch = [observation_json(), observation_json(), observation_json(power_dbm=-90.0)]
+    batch[2]["timestamp"] = "2026-10-06T10:15:31Z"
+    env.client.post("/api/v1/observations", json=batch)
+    env.client.post("/api/v1/observations", json=[observation_json(power_dbm=99)])
+
+    assert _sample("ingest_observations_received_total") - before["received"] == 3
+    assert _sample("ingest_observations_duplicate_total") - before["duplicate"] == 1
+    assert _sample("ingest_rule_matches_published_total") - before["published"] == 1
+    assert _sample("ingest_batches_rejected_total") - before["rejected"] == 1
+
+
+def test_unhandled_error_is_500_and_recorded(env, monkeypatch):
+    async def boom():
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(env.rules, "list_enabled", boom)
+    labels = {"method": "POST", "route": "/api/v1/observations", "status": "500"}
+    before = _sample("http_request_duration_seconds_count", labels)
+
+    r = env.client.post("/api/v1/observations", json=observation_json())
+
+    assert_error(r, 500, "internal_error")
+    assert _sample("http_request_duration_seconds_count", labels) - before == 1

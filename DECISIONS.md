@@ -27,6 +27,11 @@ Asynchronous, persistent log with consumer groups and explicit acknowledgements:
 that was not acked is redelivered after a restart. One lightweight container.
 - **Kafka** rejected: correct tool at large scale, but heavy to run on a single VM for this load.
 - **RabbitMQ** viable, but adds a component with no advantage for a single stream and one consumer.
+- **Bounded stream:** ingest appends with `MAXLEN ~100000`, so Redis memory cannot grow without
+  limit. Trimming can drop entries that alert-service has not acked yet, but only if it is down
+  long enough for about 100k matches to pile up (hours at simulator rates). Within that window,
+  unacked events are redelivered as described above. **With more time:** trim by the consumer
+  group's acked position (`XTRIM MINID`) instead of a fixed length.
 
 ---
 
@@ -165,6 +170,8 @@ through the API and persist across restarts. The pipeline redeploys on every mer
 "file wins on startup" approach would revert operator changes on every deploy. Re-adding
 missing rules on each startup was rejected because it resurrects rules deleted through the API.
 - **Trade-off:** editing the YAML after first boot has no effect unless the rules table is reset.
+- A missing or invalid `RULES_FILE` stops startup. A wrong path would otherwise start the
+  service with zero rules, and no alert would ever open.
 
 ---
 
@@ -185,6 +192,12 @@ missing rules on each startup was rejected because it resurrects rules deleted t
   with any invalid item returns **422** and lists **every** invalid item with index and
   reason, so the sensor can fix all of them in one round. A single invalid observation
   returns 422. Duplicates are not errors: they are skipped as in §7.
+- **Batch size limit:** at most `MAX_BATCH_SIZE` items (default 1000) per request; a larger
+  request gets **413** and nothing is stored. A batch is one transaction, so an unbounded array
+  would hold a DB connection and locks for an unbounded time. An empty array is accepted as a
+  no-op (`accepted: 0`).
+- A deadlock or serialization conflict returns **503**, like an unreachable DB, so the sensor
+  retries. Observations are inserted in a fixed key order so overlapping batches do not deadlock.
 - **Alternative considered: partial acceptance** (store valid items, reject invalid ones).
   Rejected because it stores readings from a sensor that is likely misbehaving.
 - **Trade-off:** one bad reading drops valid readings in the same batch, possibly including a

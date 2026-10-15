@@ -84,3 +84,10 @@ def test_body_must_be_object_or_array_of_objects(payload):
     with pytest.raises(ApiError) as exc:
         parse_observations(payload)
     assert exc.value.status_code == 422
+
+
+def test_batch_over_limit_rejected_before_validation():
+    with pytest.raises(ApiError) as exc:
+        parse_observations([observation_json()] * 3, max_batch_size=2)
+    assert exc.value.status_code == 413
+    assert exc.value.error == "batch_too_large"

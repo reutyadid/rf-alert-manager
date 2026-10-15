@@ -22,6 +22,7 @@ from ingest_service.adapters import postgres, redis_publisher
 from ingest_service.adapters.log_config import configure_logging
 from ingest_service.adapters.rules_yaml import read_rules_file
 from ingest_service.api.app import Services, create_app
+from ingest_service.api.observations import DEFAULT_MAX_BATCH_SIZE
 from ingest_service.api.schemas import RuleIn
 from ingest_service.domain.errors import DependencyUnavailable
 from ingest_service.domain.ingest import IngestService
@@ -39,6 +40,7 @@ class Settings(BaseSettings):
     redis_url: str
     rules_file: Path = DEFAULT_RULES_FILE
     default_max_gap_s: float = Field(default=3.0, gt=0)
+    max_batch_size: int = Field(default=DEFAULT_MAX_BATCH_SIZE, ge=1)
     log_level: str = "INFO"
     host: str = "0.0.0.0"
     port: int = 8000
@@ -60,11 +62,11 @@ async def _with_retries(name: str, attempt: Callable[[], Awaitable], settings: S
             await asyncio.sleep(settings.startup_retry_delay_s)
 
 
-async def _seed_rules(rules: RuleService, path: Path) -> None:
-    if not path.exists():
-        log.warning("rules file not found, skipping seed", extra={"rules_file": str(path)})
-        return
-    # Invalid seed file = fail fast at startup rather than run with surprising rules.
+async def seed_rules(rules: RuleService, path: Path) -> None:
+    # Missing or invalid seed file = fail fast at startup. A wrong RULES_FILE path would
+    # otherwise start the service with zero rules, and no alert would ever open.
+    if not path.is_file():
+        raise FileNotFoundError(f"RULES_FILE not found: {path}")
     seed = [RuleIn.model_validate(item) for item in read_rules_file(path)]
     count = await rules.seed_if_empty([r.to_domain(r.rule_id) for r in seed])
     log.info("rules seed", extra={"rules_file": str(path), "seeded": count})
@@ -87,7 +89,7 @@ async def lifespan(app: FastAPI):
 
         rule_repo = postgres.PostgresRuleRepository(pool)
         rules = RuleService(rule_repo)
-        await _seed_rules(rules, settings.rules_file)
+        await seed_rules(rules, settings.rules_file)
 
         app.state.services = Services(
             ingest=IngestService(
@@ -112,7 +114,7 @@ async def lifespan(app: FastAPI):
 
 
 def build_app(settings: Settings) -> FastAPI:
-    app = create_app(lifespan=lifespan)
+    app = create_app(lifespan=lifespan, max_batch_size=settings.max_batch_size)
     app.state.settings = settings
     return app
 
