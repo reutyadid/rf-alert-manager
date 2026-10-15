@@ -113,3 +113,9 @@ def test_metrics_endpoint(client):
     response = client.get("/metrics")
     assert response.status_code == 200
     assert "late_observations_dropped_total" in response.text
+
+
+def test_inverted_frequency_range_is_rejected(client):
+    response = client.get("/api/v1/alerts?min_frequency_mhz=2500&max_frequency_mhz=2400")
+    assert response.status_code == 422
+    assert response.json()["error"] == "validation_error"

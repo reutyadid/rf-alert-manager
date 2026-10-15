@@ -1,8 +1,11 @@
 import asyncio
 import logging
 
+import asyncpg
 import redis.asyncio as redis
+from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import ResponseError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from alert_service.adapters import metrics
 from alert_service.adapters.events import InvalidEvent, parse_rule_match
@@ -10,6 +13,15 @@ from alert_service.domain.models import MatchOutcome
 from alert_service.domain.service import AlertService
 
 log = logging.getLogger(__name__)
+
+# Errors that mean a dependency is unavailable: never give up on the entry, retry later.
+TRANSIENT_ERRORS = (
+    OSError,  # includes ConnectionError and TimeoutError
+    asyncpg.PostgresConnectionError,
+    asyncpg.InterfaceError,
+    RedisConnectionError,
+    RedisTimeoutError,
+)
 
 
 class RedisMatchConsumer:
@@ -19,6 +31,10 @@ class RedisMatchConsumer:
     PostgreSQL), so a crash or DB error means redelivery, never loss. On startup and after
     an error, this consumer's own unacknowledged entries are read again first ("0").
     Redelivery is safe because the domain skips observation_ids it has already seen.
+
+    An entry that fails max_attempts times with a non-transient error (a bug or a value the
+    parser did not catch) is logged, counted and acked, so one message cannot block the
+    stream. Transient errors (DB or Redis down) never count towards that limit.
     """
 
     def __init__(
@@ -31,6 +47,7 @@ class RedisMatchConsumer:
         batch_size: int = 100,
         block_ms: int = 5000,
         retry_delay_s: float = 2.0,
+        max_attempts: int = 3,
     ) -> None:
         self._redis = client
         self._service = service
@@ -40,6 +57,8 @@ class RedisMatchConsumer:
         self._batch_size = batch_size
         self._block_ms = block_ms
         self._retry_delay_s = retry_delay_s
+        self._max_attempts = max_attempts
+        self._failures: dict[str, int] = {}
 
     async def ensure_group(self) -> None:
         try:
@@ -49,10 +68,13 @@ class RedisMatchConsumer:
                 raise
 
     async def run(self) -> None:
-        await self.ensure_group()
+        group_ready = False
         read_from = "0"  # our own pending entries first
         while True:
             try:
+                if not group_ready:
+                    await self.ensure_group()
+                    group_ready = True
                 handled = await self.poll_once(read_from)
                 if read_from == "0" and handled == 0:
                     read_from = ">"  # pending drained: switch to new entries
@@ -74,7 +96,24 @@ class RedisMatchConsumer:
         )
         entries = response[0][1] if response else []
         for entry_id, fields in entries:
-            await self._handle(entry_id, fields)
+            try:
+                await self._handle(entry_id, fields)
+            except TRANSIENT_ERRORS:
+                raise
+            except Exception:
+                attempts = self._failures.get(entry_id, 0) + 1
+                if attempts < self._max_attempts:
+                    self._failures[entry_id] = attempts
+                    raise
+                self._failures.pop(entry_id, None)
+                metrics.FAILED_EVENTS.inc()
+                log.exception(
+                    "rule_match failed repeatedly; acking to unblock the stream",
+                    extra={"entry_id": entry_id, "attempts": attempts},
+                )
+                await self._redis.xack(self._stream, self._group, entry_id)
+            else:
+                self._failures.pop(entry_id, None)
         return len(entries)
 
     async def _handle(self, entry_id: str, fields: dict[str, str] | None) -> None:

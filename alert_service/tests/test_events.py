@@ -53,6 +53,16 @@ def test_offset_timestamps_are_converted_to_utc():
         json.dumps(event(frequency_mhz=True)),
         json.dumps(event(rule="HIGH")),
         "",
+        # Values that would crash the domain and block the stream (review finding 1).
+        '{"frequency_mhz": NaN}',
+        json.dumps(event()).replace("2437.0", "NaN"),
+        json.dumps(event()).replace("-42.5", "Infinity"),
+        json.dumps(event(frequency_mhz=1e308)),
+        json.dumps(event(frequency_mhz=0.5)),
+        json.dumps(event(power_dbm=-500)),
+        json.dumps(event(rule={**event()["rule"], "max_gap_s": -1})),
+        json.dumps(event(rule={**event()["rule"], "min_duration_s": 1e300})),
+        json.dumps(event(rule={**event()["rule"], "resolve_after_s": float("inf")})),
     ],
 )
 def test_invalid_events_are_rejected(data):

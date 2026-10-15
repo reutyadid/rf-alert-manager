@@ -40,6 +40,17 @@ async def list_alerts(
     max_frequency_mhz: float | None = Query(default=None, ge=0),
     limit: int = Query(default=100, ge=1, le=1000),
 ):
+    if (
+        min_frequency_mhz is not None
+        and max_frequency_mhz is not None
+        and min_frequency_mhz > max_frequency_mhz
+    ):
+        return _error(
+            422,
+            "validation_error",
+            "invalid request",
+            [{"loc": ["query", "min_frequency_mhz"], "reason": "must be <= max_frequency_mhz"}],
+        )
     flt = AlertFilter(state, severity, sensor_id, min_frequency_mhz, max_frequency_mhz, limit)
     return [AlertOut.from_domain(a) for a in await _service(request).list_alerts(flt)]
 

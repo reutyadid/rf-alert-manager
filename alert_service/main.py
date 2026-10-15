@@ -9,6 +9,7 @@ import asyncpg
 import redis.asyncio as redis
 import uvicorn
 from fastapi import FastAPI
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from alert_service.adapters import metrics
@@ -28,10 +29,11 @@ class Settings(BaseSettings):
 
     database_url: str
     redis_url: str
-    freq_tolerance_mhz: float = 0.1
-    allowed_lateness_s: float = 30
-    idle_timeout_s: float = 30
-    sweep_interval_s: float = 5
+    # Validated so a bad value fails at startup instead of stalling the consumer.
+    freq_tolerance_mhz: float = Field(default=0.1, gt=0)
+    allowed_lateness_s: float = Field(default=30, ge=0)
+    idle_timeout_s: float = Field(default=30, gt=0)
+    sweep_interval_s: float = Field(default=5, gt=0)
     log_level: str = "INFO"
     rule_matches_stream: str = "rule_matches"
     consumer_group: str = "alert-service"
@@ -53,6 +55,18 @@ async def with_retries[T](
             )
             await asyncio.sleep(delay_s)
     raise AssertionError("unreachable")
+
+
+def tasks_alive(tasks: list[asyncio.Task]) -> Callable[[], Awaitable[None]]:
+    """Health check: 503 if the consumer or sweep task has stopped, even if DB and Redis
+    are reachable (otherwise /health would stay green while no events are processed)."""
+
+    async def check() -> None:
+        stopped = [t.get_name() for t in tasks if t.done()]
+        if stopped:
+            raise RuntimeError(f"background task stopped: {', '.join(stopped)}")
+
+    return check
 
 
 async def sweep_loop(service: AlertService, interval_s: float) -> None:
@@ -91,15 +105,16 @@ def build_app(settings: Settings) -> FastAPI:
             group=settings.consumer_group,
             consumer=settings.consumer_group,
         )
-        app.state.service = service
-        app.state.health_checks = {
-            "database": lambda: pool.fetchval("SELECT 1"),
-            "redis": client.ping,
-        }
         tasks = [
             asyncio.create_task(consumer.run(), name="consumer"),
             asyncio.create_task(sweep_loop(service, settings.sweep_interval_s), name="sweep"),
         ]
+        app.state.service = service
+        app.state.health_checks = {
+            "database": lambda: pool.fetchval("SELECT 1"),
+            "redis": client.ping,
+            "background_tasks": tasks_alive(tasks),
+        }
         log.info("alert-service started")
         try:
             yield

@@ -46,11 +46,11 @@ class AlertService:
 
     async def handle_match(self, match: RuleMatch) -> MatchOutcome:
         async with self._lock:
+            key = compute_signal_key(match.rule_id, match.frequency_mhz, self._tolerance)
             if self._watermark.is_late(match.timestamp):
                 return MatchOutcome.LATE
             self._watermark.observe(match.timestamp)
 
-            key = compute_signal_key(match.rule_id, match.frequency_mhz, self._tolerance)
             alert = await self._repo.get_active_by_signal_key(key)
             if alert is not None:
                 return await self._update(alert, match)

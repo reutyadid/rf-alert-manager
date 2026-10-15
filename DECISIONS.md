@@ -48,7 +48,8 @@ broker client.
 - **alert-service is stateful:** all time-dependent decisions (min duration, dedup,
   auto-resolve) live in one place.
 - Rule parameters are copied into each event, so alert-service never reads the rules table and
-  the services stay decoupled. Events carry `schema_version` for safe evolution.
+  the services stay decoupled. Events may carry `schema_version` for safe evolution;
+  alert-service treats a missing value as 1 and rejects (counts and acks) any other version.
 
 ### 3.1 How I read "one ingests observations and evaluates rules; a second receives and manages alerts"
 
@@ -118,8 +119,13 @@ All lifecycle decisions use the observation timestamp. A global **watermark** =
 - Aggregates are order-independent (`first_seen=min`, `last_seen=max`, `peak=max`, count,
   sensor union), so out-of-order arrival does not corrupt alert data. Only open/resolve
   transitions depend on the watermark.
-- Pending runs extend backwards for an early event within `max_gap_s`, so out-of-order events
-  do not break a valid run.
+- Pending runs extend backwards for an early event within `max_gap_s`, so events reordered by
+  up to `max_gap_s` do not break a valid run.
+- **Limitation:** reordering larger than `max_gap_s` can still split a run even though the
+  events are within the allowed lateness. Example: 0..5 arrive, then 9 arrives before 6..8;
+  9 resets the run, so 0..5 are dropped and the alert opens a few seconds late with a later
+  `first_seen`. With more time: keep the previous run until the watermark passes
+  `last_ts + max_gap_s`, and merge runs when the missing events arrive.
 - **Idle fallback:** if no event arrives for `IDLE_TIMEOUT_S` of wall-clock time, the
   watermark advances by the elapsed wall-clock time; otherwise, if all sensors go silent, no
   alert would ever resolve.

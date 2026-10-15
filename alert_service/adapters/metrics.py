@@ -19,3 +19,7 @@ ALERTS_RESOLVED = Counter(
     ["reason"],
 )
 PENDING_RUNS = Gauge("pending_runs", "Signals with a pending run (not yet min_duration_s)")
+FAILED_EVENTS = Counter(
+    "failed_events_total",
+    "rule_match events acked after failing max_attempts times with a non-transient error",
+)

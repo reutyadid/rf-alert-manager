@@ -310,3 +310,26 @@ async def test_unknown_alert_raises_not_found():
         await service.resolve("alrt-missing")
     with pytest.raises(AlertNotFound):
         await service.get_alert("alrt-missing")
+
+
+async def test_sweep_resolves_acknowledged_alert():
+    service, _, _ = build()
+    await feed(service, range(0, 11))
+    [alert] = await alerts(service)
+    await service.acknowledge(alert.alert_id)
+    await service.handle_match(match(101, freq=100.0))  # watermark 71: 61 s > 60 s
+    [resolved] = await service.sweep()
+    assert resolved.state is AlertState.RESOLVED
+
+
+async def test_replayed_pending_observation_after_open_is_a_duplicate():
+    # Crash after the alert was written but before XACK: Redis redelivers the opening batch.
+    service, _, _ = build()
+    for t in range(0, 11):
+        await service.handle_match(match(t, obs_id=f"replay-{t}"))
+    for t in range(0, 11):
+        assert await service.handle_match(match(t, obs_id=f"replay-{t}")) is (
+            MatchOutcome.DUPLICATE
+        )
+    [alert] = await alerts(service)
+    assert alert.occurrences == 11
