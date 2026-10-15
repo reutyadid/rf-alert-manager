@@ -139,8 +139,16 @@ horizontally. Unacked messages are redelivered after a crash.
 Pending runs and the watermark are in memory; alerts are in PostgreSQL. A pending run lives at
 most `min_duration_s + max_gap_s` seconds. After a restart, an emitter that is still
 transmitting starts a new run, so the alert opens a few seconds late rather than being missed.
-Open alerts are unaffected. Until the first event after restart, no auto-resolve happens (safe
-direction).
+Open alerts are unaffected.
+- **Watermark after restart:** the idle fallback also applies before the first event. If no
+  event arrives for `IDLE_TIMEOUT_S` after startup, the watermark starts at
+  `startup time + elapsed - ALLOWED_LATENESS_S` and keeps advancing with the wall clock.
+  Without this, an OPEN alert whose emitter disappeared during the downtime would never
+  resolve, because no event for it will ever arrive. This assumes sensor clocks are roughly
+  in sync with the server clock.
+- A pending run stores its contributions (not only first/last timestamps), so when the alert
+  opens its occurrences, sensors, peak power and contributing observations cover the whole
+  run. The list is small: at most `min_duration_s + max_gap_s` seconds of matches.
 - **With more time:** persist pending state (e.g. Redis with AOF) for zero-delay recovery.
 
 ### 4.7 Rule changes while a run is pending

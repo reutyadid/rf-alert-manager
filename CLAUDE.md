@@ -97,10 +97,16 @@ PENDING --(gap > max_gap_s)--> IDLE (start a new run)
 OPEN/ACKNOWLEDGED --(watermark - last_seen > resolve_after_s)--> RESOLVED
 RESOLVED + new match --> new run (new alert later)
 ```
-- Pending run keeps only `first_ts` and `last_ts`:
-  - event after `last_ts` by more than `max_gap_s` → reset run to this event
+- Pending run keeps `first_ts`, `last_ts`, the rule params of its most recent event, and
+  its list of contributions (observation_id, sensor_id, timestamp, frequency, power), so an
+  alert opens with correct occurrences, sensor_ids, peak power and contributing observations.
+  Bounds:
+  - event after `last_ts` by more than `max_gap_s` → reset run to this event (drop contributions)
   - event before `first_ts` within `max_gap_s` → extend `first_ts`
+  - event before `first_ts` by more than `max_gap_s` → ignored
   - event inside the run → no change to bounds
+- On open, `severity` and `resolve_after_s` are snapshotted onto the alert row; the sweep
+  never needs rule data. Event fields are always present; alert-service applies no defaults.
 - Dedup: while an alert for the key is OPEN or ACKNOWLEDGED, matches update it.
 - Order-independent updates: `first_seen=min`, `last_seen=max`, `peak_power_dbm=max`,
   `occurrences+=1`, `sensor_ids=union`, contributing `observation_ids` appended.
@@ -114,7 +120,10 @@ RESOLVED + new match --> new run (new alert later)
   (it is still stored by ingest).
 - Sweep task every few seconds: auto-resolve using `watermark`, never wall clock.
 - Idle fallback: if no event arrived for `IDLE_TIMEOUT_S` of wall-clock time, advance the
-  watermark by the wall-clock time elapsed.
+  watermark by the wall-clock time elapsed. This also applies when no event has been seen
+  since startup (the start time is used as the base), so OPEN alerts left in PostgreSQL by a
+  previous run still auto-resolve after a restart.
+- Ack on an ACKNOWLEDGED alert is a no-op (200); ack on RESOLVED is 409.
 - Pending runs and watermark live in memory; alerts live in PostgreSQL.
 
 ## Configuration
