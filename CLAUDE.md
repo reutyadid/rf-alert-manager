@@ -84,6 +84,9 @@ Each service:
 }
 ```
 Rule parameters travel inside the event so alert-service never reads the rules table.
+Wire format: `XADD rule_matches * data <JSON>`, consumer group `alert-service`. All fields are
+required except `schema_version`: alert-service treats a missing `schema_version` as 1 and
+rejects (logs, counts, acks) any other version.
 
 ### Signal key
 `compute_signal_key(rule_id, frequency_mhz)` = `rule_id` + frequency rounded to
