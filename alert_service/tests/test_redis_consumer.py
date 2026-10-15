@@ -50,7 +50,7 @@ async def setup():
     await client.delete(STREAM)
     clock = FakeClock(T0)
     repo = InMemoryAlertRepository()
-    service = AlertService(repo, clock, Watermark(clock, 30, 30), freq_tolerance_mhz=0.1)
+    service = AlertService(repo, clock, Watermark(clock, 30, 30), 0.1, max_clock_skew_s=60)
     consumer = RedisMatchConsumer(client, service, stream=STREAM, block_ms=100)
     await consumer.ensure_group()
     await consumer.ensure_group()  # idempotent

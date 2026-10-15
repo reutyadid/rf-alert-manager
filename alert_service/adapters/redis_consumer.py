@@ -133,6 +133,12 @@ class RedisMatchConsumer:
         metrics.PENDING_RUNS.set(self._service.pending_run_count)
         if outcome is MatchOutcome.LATE:
             metrics.LATE_DROPPED.inc()
+        if outcome is MatchOutcome.FUTURE:
+            metrics.FUTURE_DROPPED.inc()
+            log.warning(
+                "rule_match from the future dropped (sensor clock ahead?)",
+                extra={"sensor_id": match.sensor_id, "timestamp": match.timestamp.isoformat()},
+            )
         if outcome is MatchOutcome.OPENED:
             log.info(
                 "alert opened",

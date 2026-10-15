@@ -112,6 +112,11 @@ part of the key, so several sensors hearing one emitter contribute to one alert 
 All lifecycle decisions use the observation timestamp. A global **watermark** =
 `max event time seen - ALLOWED_LATENESS_S` (30 s default).
 - Late event within the allowed lateness: processed normally.
+- **Event from the future:** an event stamped more than `MAX_CLOCK_SKEW_S` (60 s) ahead of the
+  server clock is dropped and counted in `future_observations_dropped_total`. One sensor with a
+  wrong clock would otherwise push the global watermark forward: every real event would be
+  dropped as late and every open alert would auto-resolve. This is the one place where the
+  wall clock limits event time; it assumes sensor clocks are roughly in sync (NTP).
 - Event older than the watermark: stored by ingest for history, but does not change alert
   state; counted in `late_observations_dropped_total`.
 - Auto-resolve runs in a periodic sweep using the watermark, never the wall clock, so a sensor

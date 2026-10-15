@@ -121,6 +121,8 @@ RESOLVED + new match --> new run (new alert later)
 - `watermark = max_event_time_seen - ALLOWED_LATENESS_S` (global, in memory).
 - Event older than the watermark: counted in `late_observations_dropped_total`, does not change state
   (it is still stored by ingest).
+- Event more than `MAX_CLOCK_SKEW_S` (default 60) ahead of the server clock: counted in
+  `future_observations_dropped_total`, does not change state and does not move the watermark.
 - Sweep task every few seconds: auto-resolve using `watermark`, never wall clock.
 - Idle fallback: if no event arrived for `IDLE_TIMEOUT_S` of wall-clock time, advance the
   watermark by the wall-clock time elapsed. This also applies when no event has been seen
@@ -135,7 +137,8 @@ in the composition root. `.env.example` is committed; `.env` is never committed.
 No secrets in code, compose files, images or workflow files (use GitHub Secrets).
 
 Key settings: `DATABASE_URL`, `REDIS_URL`, `RULES_FILE`, `FREQ_TOLERANCE_MHZ`,
-`DEFAULT_MAX_GAP_S`, `ALLOWED_LATENESS_S`, `IDLE_TIMEOUT_S`, `SWEEP_INTERVAL_S`, `LOG_LEVEL`.
+`DEFAULT_MAX_GAP_S`, `ALLOWED_LATENESS_S`, `IDLE_TIMEOUT_S`, `SWEEP_INTERVAL_S`, `MAX_CLOCK_SKEW_S`,
+`LOG_LEVEL`.
 
 ## Operational conventions
 - Logs: structured JSON to stdout only. Rotation is configured in compose (json-file max-size/max-file).

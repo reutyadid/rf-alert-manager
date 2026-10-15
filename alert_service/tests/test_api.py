@@ -23,7 +23,7 @@ async def down():
 @pytest.fixture
 def client():
     clock = FakeClock(T0)
-    service = AlertService(InMemoryAlertRepository(), clock, Watermark(clock, 30, 30), 0.1)
+    service = AlertService(InMemoryAlertRepository(), clock, Watermark(clock, 30, 30), 0.1, 60)
     app = create_app()
     app.state.service = service
     app.state.health_checks = {"database": ok, "redis": ok}

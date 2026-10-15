@@ -9,6 +9,10 @@ LATE_DROPPED = Counter(
     "late_observations_dropped_total",
     "rule_match events older than the watermark (no effect on alert state)",
 )
+FUTURE_DROPPED = Counter(
+    "future_observations_dropped_total",
+    "rule_match events stamped more than MAX_CLOCK_SKEW_S ahead of the server clock",
+)
 INVALID_EVENTS = Counter(
     "invalid_events_total",
     "rule_match events that could not be parsed (acknowledged and skipped)",

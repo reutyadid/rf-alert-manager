@@ -23,6 +23,7 @@ class MatchOutcome(StrEnum):
     UPDATED = "updated"  # updated an OPEN/ACKNOWLEDGED alert
     DUPLICATE = "duplicate"  # observation_id already contributed
     LATE = "late"  # older than the watermark
+    FUTURE = "future"  # ahead of the server clock by more than max_clock_skew_s
     IGNORED = "ignored"  # earlier than the pending run by more than max_gap_s
 
 

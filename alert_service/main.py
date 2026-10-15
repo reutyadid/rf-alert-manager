@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     allowed_lateness_s: float = Field(default=30, ge=0)
     idle_timeout_s: float = Field(default=30, gt=0)
     sweep_interval_s: float = Field(default=5, gt=0)
+    max_clock_skew_s: float = Field(default=60, gt=0)
     log_level: str = "INFO"
     rule_matches_stream: str = "rule_matches"
     consumer_group: str = "alert-service"
@@ -96,7 +97,11 @@ def build_app(settings: Settings) -> FastAPI:
         clock = SystemClock()
         watermark = Watermark(clock, settings.allowed_lateness_s, settings.idle_timeout_s)
         service = AlertService(
-            PostgresAlertRepository(pool), clock, watermark, settings.freq_tolerance_mhz
+            PostgresAlertRepository(pool),
+            clock,
+            watermark,
+            settings.freq_tolerance_mhz,
+            settings.max_clock_skew_s,
         )
         consumer = RedisMatchConsumer(
             client,

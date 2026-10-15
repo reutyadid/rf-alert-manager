@@ -30,11 +30,13 @@ class AlertService:
         clock: Clock,
         watermark: Watermark,
         freq_tolerance_mhz: float,
+        max_clock_skew_s: float,
     ) -> None:
         self._repo = repo
         self._clock = clock
         self._watermark = watermark
         self._tolerance = freq_tolerance_mhz
+        self._max_skew = timedelta(seconds=max_clock_skew_s)
         self._pending: dict[str, PendingRun] = {}
         self._lock = asyncio.Lock()
 
@@ -47,6 +49,10 @@ class AlertService:
     async def handle_match(self, match: RuleMatch) -> MatchOutcome:
         async with self._lock:
             key = compute_signal_key(match.rule_id, match.frequency_mhz, self._tolerance)
+            # A sensor clock far ahead would push the global watermark forward: every real
+            # event would then be LATE and every open alert would auto-resolve.
+            if match.timestamp > self._now() + self._max_skew:
+                return MatchOutcome.FUTURE
             if self._watermark.is_late(match.timestamp):
                 return MatchOutcome.LATE
             self._watermark.observe(match.timestamp)

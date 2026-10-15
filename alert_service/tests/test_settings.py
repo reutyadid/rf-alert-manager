@@ -18,6 +18,7 @@ def test_defaults_are_valid():
         {"allowed_lateness_s": -1},
         {"idle_timeout_s": 0},
         {"sweep_interval_s": 0},
+        {"max_clock_skew_s": 0},
     ],
 )
 def test_invalid_values_fail_at_startup(override):

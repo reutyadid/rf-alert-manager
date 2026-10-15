@@ -48,11 +48,15 @@ def match(
     )
 
 
-def build(repo: InMemoryAlertRepository | None = None):
+def build(repo: InMemoryAlertRepository | None = None, max_clock_skew_s: float = 3600):
+    # The wall clock stays at T0 in most tests while event time moves on, so the default
+    # skew is large; the clock-skew tests pass a small one.
     clock = FakeClock(T0)
     repo = repo or InMemoryAlertRepository()
     watermark = Watermark(clock, allowed_lateness_s=30, idle_timeout_s=30)
-    service = AlertService(repo, clock, watermark, freq_tolerance_mhz=0.1)
+    service = AlertService(
+        repo, clock, watermark, freq_tolerance_mhz=0.1, max_clock_skew_s=max_clock_skew_s
+    )
     return service, repo, clock
 
 
@@ -333,3 +337,29 @@ async def test_replayed_pending_observation_after_open_is_a_duplicate():
         )
     [alert] = await alerts(service)
     assert alert.occurrences == 11
+
+
+# --- clock skew ----------------------------------------------------------------------
+
+
+async def test_event_too_far_in_the_future_is_rejected_and_does_not_move_the_watermark():
+    service, _, _ = build(max_clock_skew_s=60)  # wall clock = T0
+    assert await service.handle_match(match(61, freq=100.0)) is MatchOutcome.FUTURE
+    assert service.pending_run_count == 0
+    # Had the watermark moved to 61 - 30 = 31, this would be LATE. It is processed normally.
+    assert await service.handle_match(match(0)) is MatchOutcome.PENDING
+
+
+async def test_event_within_clock_skew_is_accepted():
+    service, _, _ = build(max_clock_skew_s=60)
+    assert await service.handle_match(match(60)) is MatchOutcome.PENDING
+
+
+async def test_future_event_cannot_resolve_open_alerts():
+    service, _, _ = build(max_clock_skew_s=60)
+    await feed(service, range(0, 11))
+    # A sensor with a clock a year ahead.
+    await service.handle_match(match(365 * 24 * 3600))
+    assert await service.sweep() == []
+    [alert] = await alerts(service)
+    assert alert.state is AlertState.OPEN
