@@ -12,6 +12,12 @@ from typing import Protocol, Self
 from ingest_service.domain.models import Observation, ObservationQuery, Rule, Sensor
 
 
+class Clock(Protocol):
+    def now(self) -> datetime:
+        """Current time, timezone-aware UTC. Domain code never calls datetime.now()."""
+        ...
+
+
 class IngestUnitOfWork(Protocol):
     """One database transaction plus the events to publish with it (docs/adr/0001).
 

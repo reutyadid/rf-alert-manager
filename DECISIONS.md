@@ -182,6 +182,15 @@ missing rules on each startup was rejected because it resurrects rules deleted t
 - Timestamps with any UTC offset (e.g. `+03:00`) are accepted and converted to UTC: it is
   the same instant, and rejecting it gains nothing. Naive timestamps (no offset) are rejected
   because the instant is ambiguous.
+- **Future timestamps:** a timestamp more than `MAX_CLOCK_SKEW_S` (default 60 s) ahead of the
+  server clock is invalid (422, counted like any invalid item, so the whole batch is rejected).
+  alert-service drops such events anyway, to stop one bad sensor clock from pushing the
+  watermark forward, so storing them would only keep data that can never affect alerts. A 422
+  tells the sensor its clock is wrong. Both services use the same setting name and default;
+  alert-service keeps its own check as a second line of defence. The server time comes from an
+  injected `Clock`.
+  - **Trade-off:** a server clock that is behind rejects valid observations, so the VM must run
+    NTP. Past timestamps are not limited; old data is stored, and alert-service handles lateness.
 - Sensor `last_seen` is the latest **event time** reported by the sensor (`GREATEST`), not the
   arrival time, consistent with the rest of the system. A delayed batch does not move it backwards.
 - **Batch: all or nothing.** If any item is invalid, the whole batch is rejected and nothing

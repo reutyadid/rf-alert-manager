@@ -19,6 +19,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from redis.asyncio import Redis
 
 from ingest_service.adapters import postgres, redis_publisher
+from ingest_service.adapters.clock import SystemClock
 from ingest_service.adapters.log_config import configure_logging
 from ingest_service.adapters.prometheus_metrics import PrometheusMetrics
 from ingest_service.adapters.rules_yaml import read_rules_file
@@ -28,6 +29,7 @@ from ingest_service.api.schemas import RuleIn
 from ingest_service.domain.errors import DependencyUnavailable
 from ingest_service.domain.ingest import IngestService
 from ingest_service.domain.rules import RuleService
+from ingest_service.domain.validation import DEFAULT_MAX_CLOCK_SKEW_S
 
 log = logging.getLogger("ingest_service")
 
@@ -42,6 +44,7 @@ class Settings(BaseSettings):
     rules_file: Path = DEFAULT_RULES_FILE
     default_max_gap_s: float = Field(default=3.0, gt=0)
     max_batch_size: int = Field(default=DEFAULT_MAX_BATCH_SIZE, ge=1)
+    max_clock_skew_s: float = Field(default=DEFAULT_MAX_CLOCK_SKEW_S, ge=0)
     log_level: str = "INFO"
     host: str = "0.0.0.0"
     port: int = 8000
@@ -116,7 +119,12 @@ async def lifespan(app: FastAPI):
 
 
 def build_app(settings: Settings) -> FastAPI:
-    app = create_app(lifespan=lifespan, max_batch_size=settings.max_batch_size)
+    app = create_app(
+        lifespan=lifespan,
+        max_batch_size=settings.max_batch_size,
+        clock=SystemClock(),
+        max_clock_skew_s=settings.max_clock_skew_s,
+    )
     app.state.settings = settings
     return app
 

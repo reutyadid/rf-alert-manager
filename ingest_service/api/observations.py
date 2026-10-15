@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Query, Request
@@ -11,6 +12,7 @@ from ingest_service.api import metrics
 from ingest_service.api.errors import ApiError, field_path
 from ingest_service.api.schemas import IngestResponse, IsoTimestamp, ObservationIn, ObservationOut
 from ingest_service.domain.models import Observation, ObservationQuery
+from ingest_service.domain.validation import DEFAULT_MAX_CLOCK_SKEW_S, is_too_far_in_future
 
 router = APIRouter(prefix="/api/v1/observations", tags=["observations"])
 
@@ -18,9 +20,16 @@ DEFAULT_MAX_BATCH_SIZE = 1000
 
 
 def parse_observations(
-    payload: Any, max_batch_size: int = DEFAULT_MAX_BATCH_SIZE
+    payload: Any,
+    *,
+    now: datetime,
+    max_clock_skew_s: float = DEFAULT_MAX_CLOCK_SKEW_S,
+    max_batch_size: int = DEFAULT_MAX_BATCH_SIZE,
 ) -> list[Observation]:
-    """Validate a single observation or a batch. Raises ApiError listing every invalid item."""
+    """Validate a single observation or a batch. Raises ApiError listing every invalid item.
+
+    `now` is the server time used to reject timestamps too far in the future.
+    """
     if isinstance(payload, dict):
         items = [payload]
     elif isinstance(payload, list):
@@ -41,12 +50,24 @@ def parse_observations(
             details.append({"index": index, "field": "", "reason": "must be an object"})
             continue
         try:
-            observations.append(ObservationIn.model_validate(item).to_domain())
+            observation = ObservationIn.model_validate(item).to_domain()
         except ValidationError as exc:
             details.extend(
                 {"index": index, "field": field_path(e["loc"]), "reason": e["msg"]}
                 for e in exc.errors()
             )
+            continue
+        if is_too_far_in_future(observation.timestamp, now, max_clock_skew_s):
+            details.append(
+                {
+                    "index": index,
+                    "field": "timestamp",
+                    "reason": f"more than {max_clock_skew_s:g} s in the future "
+                    "(check the sensor clock)",
+                }
+            )
+            continue
+        observations.append(observation)
 
     if details:
         bad = len({d["index"] for d in details})
@@ -62,7 +83,13 @@ def parse_observations(
 @router.post("", response_model=IngestResponse)
 async def post_observations(request: Request, payload: Annotated[Any, Body()]) -> IngestResponse:
     try:
-        observations = parse_observations(payload, request.app.state.max_batch_size)
+        state = request.app.state
+        observations = parse_observations(
+            payload,
+            now=state.clock.now(),
+            max_clock_skew_s=state.max_clock_skew_s,
+            max_batch_size=state.max_batch_size,
+        )
     except ApiError:
         metrics.BATCHES_REJECTED.inc()
         raise

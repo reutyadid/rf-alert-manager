@@ -8,6 +8,14 @@ from ingest_service.domain.errors import DependencyUnavailable
 from ingest_service.domain.models import Observation, ObservationQuery, Rule, Sensor
 
 
+class FakeClock:
+    def __init__(self, now: datetime) -> None:
+        self.current = now
+
+    def now(self) -> datetime:
+        return self.current
+
+
 class FakeStore:
     """Committed state shared by the fake unit of work and the readers.
 

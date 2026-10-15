@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pytest
 from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
@@ -8,6 +10,7 @@ from ingest_service.domain.ingest import IngestService
 from ingest_service.domain.rules import RuleService
 from ingest_service.tests.builders import a_rule, observation_json, rule_json
 from ingest_service.tests.fakes import (
+    FakeClock,
     FakeObservationReader,
     FakeRuleRepository,
     FakeSensorReader,
@@ -36,7 +39,11 @@ class Env:
             sensors=FakeSensorReader(self.store),
             health_checks={"database": check("database"), "redis": check("redis")},
         )
-        app = create_app(services, max_batch_size=max_batch_size)
+        # Server clock: one day after the builders' observation times.
+        self.clock = FakeClock(datetime(2026, 10, 7, tzinfo=UTC))
+        app = create_app(
+            services, max_batch_size=max_batch_size, clock=self.clock, max_clock_skew_s=60
+        )
         self.client = TestClient(app, raise_server_exceptions=False)
 
 
@@ -295,3 +302,12 @@ def test_unhandled_error_is_500_and_recorded(env, monkeypatch):
 
     assert_error(r, 500, "internal_error")
     assert _sample("http_request_duration_seconds_count", labels) - before == 1
+
+
+def test_future_timestamp_rejected_and_nothing_stored(env):
+    env.clock.current = datetime(2026, 10, 6, 10, 0, 0, tzinfo=UTC)  # 15:30 before T0
+    r = env.client.post("/api/v1/observations", json=observation_json())
+    assert_error(r, 422, "validation_error")
+    assert r.json()["details"][0]["field"] == "timestamp"
+    assert env.store.observations == {}
+    assert env.publisher.events == []

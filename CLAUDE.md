@@ -62,6 +62,8 @@ Each service:
   (422, listing every invalid item with index and reason). A valid batch returns 200 with
   the accepted count.
 - Timestamps with any UTC offset are accepted and converted to UTC; naive timestamps are rejected.
+- A timestamp more than `MAX_CLOCK_SKEW_S` (default 60 s) ahead of the server clock (injected
+  `Clock`) is invalid → 422 (same setting and default as alert-service's drop).
 - Duplicates: unique on `(sensor_id, timestamp, frequency_mhz)`; duplicates are skipped
   (`ON CONFLICT DO NOTHING`) and NOT republished.
 - `observation_id` is deterministic:
@@ -145,7 +147,7 @@ No secrets in code, compose files, images or workflow files (use GitHub Secrets)
 
 Key settings: `DATABASE_URL`, `REDIS_URL`, `RULES_FILE`, `FREQ_TOLERANCE_MHZ`,
 `DEFAULT_MAX_GAP_S`, `ALLOWED_LATENESS_S`, `IDLE_TIMEOUT_S`, `SWEEP_INTERVAL_S`, `LOG_LEVEL`,
-`MAX_BATCH_SIZE` (ingest).
+`MAX_BATCH_SIZE` (ingest), `MAX_CLOCK_SKEW_S`.
 
 ## Operational conventions
 - Logs: structured JSON to stdout only. Rotation is configured in compose (json-file max-size/max-file).

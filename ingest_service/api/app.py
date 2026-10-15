@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from ingest_service.adapters.clock import SystemClock
 from ingest_service.api import metrics
 from ingest_service.api.errors import install_error_handlers
 from ingest_service.api.observations import DEFAULT_MAX_BATCH_SIZE
@@ -16,8 +17,9 @@ from ingest_service.api.observations import router as observations_router
 from ingest_service.api.rules import router as rules_router
 from ingest_service.api.schemas import SensorOut
 from ingest_service.domain.ingest import IngestService
-from ingest_service.domain.ports import ObservationReader, SensorReader
+from ingest_service.domain.ports import Clock, ObservationReader, SensorReader
 from ingest_service.domain.rules import RuleService
+from ingest_service.domain.validation import DEFAULT_MAX_CLOCK_SKEW_S
 
 HealthCheck = Callable[[], Awaitable[None]]
 HEALTH_TIMEOUT_S = 2.0
@@ -36,9 +38,13 @@ def create_app(
     services: Services | None = None,
     lifespan=None,
     max_batch_size: int = DEFAULT_MAX_BATCH_SIZE,
+    clock: Clock | None = None,
+    max_clock_skew_s: float = DEFAULT_MAX_CLOCK_SKEW_S,
 ) -> FastAPI:
     app = FastAPI(title="RF ingest-service", version="1.0.0", lifespan=lifespan)
     app.state.max_batch_size = max_batch_size
+    app.state.clock = clock or SystemClock()
+    app.state.max_clock_skew_s = max_clock_skew_s
     if services is not None:
         app.state.services = services
 
