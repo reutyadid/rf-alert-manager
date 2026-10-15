@@ -1,0 +1,23 @@
+# Seed rules. Loaded at startup ONLY if the rules table is empty (DECISIONS §5).
+# After the first boot, manage rules through /api/v1/rules.
+rules:
+  - rule_id: rule-ism-high-power
+    name: High power in protected ISM band
+    type: power_threshold
+    band: { min_mhz: 2400.0, max_mhz: 2483.5 }
+    threshold_dbm: -50.0
+    min_duration_s: 10
+    resolve_after_s: 60
+    severity: HIGH
+    enabled: true
+
+  - rule_id: rule-5ghz-high-power
+    name: High power in 5.8 GHz band
+    type: power_threshold
+    band: { min_mhz: 5725.0, max_mhz: 5875.0 }
+    threshold_dbm: -55.0
+    min_duration_s: 15
+    resolve_after_s: 90
+    severity: MEDIUM
+    enabled: true
+    max_gap_s: 5
