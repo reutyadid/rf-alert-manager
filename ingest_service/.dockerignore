@@ -1,0 +1,12 @@
+# Build context is ingest_service/. Keep the image to runtime code only.
+tests/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.env
+*.env
+.git
+requirements-dev.txt
+Dockerfile
+.dockerignore
