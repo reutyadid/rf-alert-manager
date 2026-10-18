@@ -190,13 +190,36 @@ make them inevitable.
 
 ---
 
-## 8. Containers and VM [TODO]
+## 8. Containers and VM [TODO: containers]
 
-- VM choice and why (local Ubuntu 24.04 with Multipass + cloud-init; free, reproducible).
-- How services start on boot.
-- Exposed ports and firewall.
-- Log rotation.
-- Persistence (named volume).
+### 8.1 VM: local Ubuntu 24.04 with Multipass + cloud-init
+- **Why local:** free, no cloud account or billing, and fully reproducible: `infra/launch-vm.ps1`
+  creates the VM from `infra/cloud-init.yaml` and prints its IP; `infra/destroy-vm.ps1` removes
+  it. Recreating from scratch is two commands.
+- **Why cloud-init:** provisioning is declarative and runs on first boot, with no manual SSH
+  steps and no extra tool (Ansible/Terraform) to install on the host.
+- **Size: 2 CPU, 2 GB RAM, 20 GB disk.** Enough for Postgres, Redis, two small Python services
+  and nginx (idle VM uses ~400 MB). 4 GB was the first choice but did not fit next to the
+  development tools on a 14 GB laptop; Hyper-V reserves VM memory up front.
+- **Cost:** a local VM is not reachable from the internet, so CI cannot push to it (see §9).
+  On Hyper-V the VM's IP can change after a host reboot; `launch-vm.ps1` prints the current one.
+
+### 8.2 Start on boot
+Docker and containerd are enabled as systemd services. The containers come back through
+`restart: unless-stopped` in compose. Verified with `multipass restart`.
+
+### 8.3 Exposed ports and firewall
+ufw denies all incoming traffic except SSH (22) and HTTP (80).
+- **Caveat:** ports published by Docker bypass ufw (Docker writes its own iptables rules).
+  Therefore only nginx publishes a port; Postgres and Redis stay on the internal compose network
+  with no `ports:` entry.
+
+### 8.4 Bounded logs
+- Docker daemon default: `json-file` with `max-size=10m`, `max-file=3`, so each container keeps
+  at most 30 MB of logs.
+- systemd journal capped at 200 MB (`SystemMaxUse`).
+
+### 8.5 Containers and persistence [TODO]
 
 ## 9. CI/CD [TODO]
 
