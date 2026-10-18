@@ -21,8 +21,19 @@ def event(**overrides) -> dict:
     return base
 
 
-def test_parses_the_agreed_contract():
-    match = parse_rule_match(json.dumps(event()))
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"min_duration_s": 10, "max_gap_s": 5, "resolve_after_s": 60, "severity": "HIGH"},
+        # ingest sends floats
+        {"min_duration_s": 10.0, "max_gap_s": 5.0, "resolve_after_s": 60.0, "severity": "HIGH"},
+    ],
+    ids=["int", "float"],
+)
+def test_parses_the_agreed_contract(rule):
+    data = event(rule=rule)
+    assert "schema_version" not in data  # the agreed contract omits it
+    match = parse_rule_match(json.dumps(data))
     assert match.observation_id == "6f1c1d3e-0000-5000-8000-000000000001"
     assert match.timestamp == datetime(2026, 10, 6, 10, 15, 30, tzinfo=UTC)
     assert match.frequency_mhz == 2437.0
