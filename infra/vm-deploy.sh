@@ -8,8 +8,8 @@ set -euo pipefail
 ARCHIVE="${1:?usage: vm-deploy.sh <release.tar>}"
 APP_DIR=/opt/rf-alert-manager
 
-# Replace the code, keep .env.
-find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name .env -exec rm -rf {} +
+# Replace the code, keep .env and the rollback marker.
+find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name .env ! -name .previous-tag -exec rm -rf {} +
 tar -xf "$ARCHIVE" -C "$APP_DIR"
 cd "$APP_DIR"
 
