@@ -72,7 +72,9 @@ One-time setup:
 2. Register the VM as a runner: GitHub → Settings → Actions → Runners → New self-hosted runner
    (Linux), copy the token (valid 1 h), then
    `powershell -ExecutionPolicy Bypass -File infra\register-runner.ps1 -Token <token>`.
-3. Branch protection on `main`: require the `lint`, `unit-tests` and `integration-tests` checks.
+3. Optional (needs a paid GitHub plan for a private repo): branch protection on `main`
+   requiring the `lint`, `unit-tests` and `integration-tests` checks. Without it a red CI still
+   blocks the deploy, but not the merge (DECISIONS §10).
 
 Rollback without GitHub (on the VM):
 

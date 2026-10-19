@@ -1,7 +1,7 @@
 # CI: lint, unit tests and integration tests on every pull request and push.
 # Runs on GitHub-hosted runners only; the self-hosted runner on the VM is used for deploy only
-# (DECISIONS §9). Branch protection on main requires all three jobs, so a failing test blocks
-# the merge.
+# (DECISIONS §9). The Deploy workflow runs only after a green CI on main, so a failing test
+# blocks the deploy (branch protection is not available on this plan, DECISIONS §10).
 name: CI
 
 on:

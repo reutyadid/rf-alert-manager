@@ -370,8 +370,9 @@ SSH key is needed. It runs as a systemd service (starts on boot), registered by
   reviewers are given read access at submission.
 
 ### 9.2 CI
-- Three jobs: `lint`, `unit-tests`, `integration-tests`. Branch protection on `main` requires
-  all of them, so a failing test blocks the merge.
+- Three jobs: `lint`, `unit-tests`, `integration-tests`. A red CI blocks the **deploy**: the
+  Deploy workflow builds only for a green CI run on `main` (seen on the first push, where CI
+  failed and Deploy was skipped). It does not technically block the **merge**; see §10.
 - **Per service:** ingest and alert pin different library versions (each has its own image),
   so one shared `pip install` is impossible. Each test job runs once per service in its own
   environment, matching what runs in production. The simulator tests run with ingest.
@@ -412,6 +413,18 @@ SSH key is needed. It runs as a systemd service (starts on boot), registered by
 - gitleaks runs in pre-commit to catch secrets committed by mistake.
 
 ## 10. Not production-ready [TODO]
+
+- **Merge is not blocked by a red CI.** Branch protection and rulesets on a private repository
+  need a paid GitHub plan (the API returns 403 on the free plan). Making the repo public would
+  enable them for free, but it was kept private because of the self-hosted runner (§9.1).
+  - **What still holds:** nothing reaches the VM without a green CI (§9.2), and the red check is
+    visible on the PR and the commit.
+  - **Gap:** someone with write access can merge a PR, or push to `main`, while CI is red; that
+    commit is then simply not deployed.
+  - **Fix:** on a paid plan (or a public repo), protect `main` and require the checks `lint`,
+    `unit-tests (ingest_service, ingest_service simulator)`, `unit-tests (alert_service,
+    alert_service)`, `integration-tests (ingest_service)` and `integration-tests (alert_service)`,
+    plus pull requests before merging.
 
 ## 11. What I would improve with more time [TODO]
 
