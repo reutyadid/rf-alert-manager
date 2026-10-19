@@ -160,6 +160,9 @@ Pending runs and the watermark are in memory; alerts are in PostgreSQL. A pendin
 most `min_duration_s + max_gap_s` seconds. After a restart, an emitter that is still
 transmitting starts a new run, so the alert opens a few seconds late rather than being missed.
 Open alerts are unaffected.
+- **Limitation:** each event is acked as soon as it updates the in-memory run. If the process
+  crashes just before the alert is committed and the emitter stops at the same time, the acked
+  events are not redelivered and the alert is missed. Persisting pending state (below) closes it.
 - **Watermark after restart:** the idle fallback also applies before the first event. If no
   event arrives for `IDLE_TIMEOUT_S` after startup, the watermark starts at
   `startup time + elapsed - ALLOWED_LATENESS_S` and keeps advancing with the wall clock.
@@ -263,7 +266,8 @@ Per request: validate → BEGIN → `INSERT … ON CONFLICT DO NOTHING RETURNING
 - **Alternative rejected: commit, then publish.** If Redis fails after the commit, the events
   are lost for good: the retry sees only duplicates, which are never republished.
 - **Alternative rejected: transactional outbox.** It closes the gap fully, but adds a table and
-  a relay process; the deterministic id already makes the remaining case harmless.
+  a relay process. The deterministic id makes the remaining case harmless **if the client
+  retries**; if it never retries, the event is a phantom (see §7.2 and the ADR).
 - **Cost:** the DB transaction stays open for one Redis round-trip (about 1 ms on the same host).
 
 ### 7.2 Phantom events on the alert side
@@ -278,7 +282,9 @@ rare cases a `rule_match` reaches alert-service for an observation whose commit 
   event was valid. When the sensor retries, ingest stores it and publishes it again with the
   same deterministic `observation_id`; alert-service skips it as a duplicate, so it is not
   counted twice.
-- **Visibility:** ingest counts phantom events in a metric, so their rate is measurable.
+- **Visibility:** ingest counts *phantom candidates* (`ingest_phantom_candidates_total`):
+  published but not committed. It is an upper bound (most heal on retry) and misses a crash
+  between publish and commit, so it shows whether the gap matters, not an exact count.
 - **With more time:** a transactional outbox in ingest (events written in the same
   transaction and published by a relay after commit) removes phantom events completely.
 

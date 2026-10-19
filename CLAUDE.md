@@ -164,7 +164,8 @@ Key settings: `DATABASE_URL`, `REDIS_URL`, `RULES_FILE`, `FREQ_TOLERANCE_MHZ`,
 
 ## Operational conventions
 - Logs: structured JSON to stdout only. Rotation is configured in compose (json-file max-size/max-file).
-- `/health` checks DB and Redis; returns 503 if either is down.
+- `/health` checks DB and Redis; returns 503 if either is down. alert-service also returns 503
+  if its consumer or sweep task has stopped.
 - Uniform error body: `{"error": "<code>", "message": "...", "details": [...]}`.
 - Connect to DB/Redis with retries on startup; compose uses `depends_on: condition: service_healthy`.
 - DB schema defined as code (init SQL or migrations) with indexes on
