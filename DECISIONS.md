@@ -56,8 +56,9 @@ broker client.
   Rule parameters are copied into each event (values at evaluation time, with `max_gap_s`
   already defaulted), so alert-service never reads the rules table and never applies defaults.
   The services stay decoupled.
-- **Versioning deferred:** the event contract (see CLAUDE.md) is fixed for this task and has no
-  `schema_version`. With more time, add one so consumers can reject unknown shapes.
+- **Versioning deferred:** the event contract (see CLAUDE.md) is fixed for this task and ingest
+  sends no `schema_version`. alert-service already treats a missing value as 1 and rejects
+  (counts and acks) any other version, so adding a version later is safe.
 
 ### 3.1 How I read "one ingests observations and evaluates rules; a second receives and manages alerts"
 
@@ -120,6 +121,11 @@ part of the key, so several sensors hearing one emitter contribute to one alert 
 All lifecycle decisions use the observation timestamp. A global **watermark** =
 `max event time seen - ALLOWED_LATENESS_S` (30 s default).
 - Late event within the allowed lateness: processed normally.
+- **Event from the future:** an event stamped more than `MAX_CLOCK_SKEW_S` (60 s) ahead of the
+  server clock is dropped and counted in `future_observations_dropped_total`. One sensor with a
+  wrong clock would otherwise push the global watermark forward: every real event would be
+  dropped as late and every open alert would auto-resolve. This is the one place where the
+  wall clock limits event time; it assumes sensor clocks are roughly in sync (NTP).
 - Event older than the watermark: stored by ingest for history, but does not change alert
   state; counted in `late_observations_dropped_total`.
 - Auto-resolve runs in a periodic sweep using the watermark, never the wall clock, so a sensor
@@ -127,8 +133,13 @@ All lifecycle decisions use the observation timestamp. A global **watermark** =
 - Aggregates are order-independent (`first_seen=min`, `last_seen=max`, `peak=max`, count,
   sensor union), so out-of-order arrival does not corrupt alert data. Only open/resolve
   transitions depend on the watermark.
-- Pending runs extend backwards for an early event within `max_gap_s`, so out-of-order events
-  do not break a valid run.
+- Pending runs extend backwards for an early event within `max_gap_s`, so events reordered by
+  up to `max_gap_s` do not break a valid run.
+- **Limitation:** reordering larger than `max_gap_s` can still split a run even though the
+  events are within the allowed lateness. Example: 0..5 arrive, then 9 arrives before 6..8;
+  9 resets the run, so 0..5 are dropped and the alert opens a few seconds late with a later
+  `first_seen`. With more time: keep the previous run until the watermark passes
+  `last_ts + max_gap_s`, and merge runs when the missing events arrive.
 - **Idle fallback:** if no event arrives for `IDLE_TIMEOUT_S` of wall-clock time, the
   watermark advances by the elapsed wall-clock time; otherwise, if all sensors go silent, no
   alert would ever resolve.
@@ -148,8 +159,16 @@ horizontally. Unacked messages are redelivered after a crash.
 Pending runs and the watermark are in memory; alerts are in PostgreSQL. A pending run lives at
 most `min_duration_s + max_gap_s` seconds. After a restart, an emitter that is still
 transmitting starts a new run, so the alert opens a few seconds late rather than being missed.
-Open alerts are unaffected. Until the first event after restart, no auto-resolve happens (safe
-direction).
+Open alerts are unaffected.
+- **Watermark after restart:** the idle fallback also applies before the first event. If no
+  event arrives for `IDLE_TIMEOUT_S` after startup, the watermark starts at
+  `startup time + elapsed - ALLOWED_LATENESS_S` and keeps advancing with the wall clock.
+  Without this, an OPEN alert whose emitter disappeared during the downtime would never
+  resolve, because no event for it will ever arrive. This assumes sensor clocks are roughly
+  in sync with the server clock.
+- A pending run stores its contributions (not only first/last timestamps), so when the alert
+  opens its occurrences, sensors, peak power and contributing observations cover the whole
+  run. The list is small: at most `min_duration_s + max_gap_s` seconds of matches.
 - **With more time:** persist pending state (e.g. Redis with AOF) for zero-delay recovery.
 
 ### 4.7 Rule changes while a run is pending
@@ -246,6 +265,22 @@ Per request: validate → BEGIN → `INSERT … ON CONFLICT DO NOTHING RETURNING
 - **Alternative rejected: transactional outbox.** It closes the gap fully, but adds a table and
   a relay process; the deterministic id already makes the remaining case harmless.
 - **Cost:** the DB transaction stays open for one Redis round-trip (about 1 ms on the same host).
+
+### 7.2 Phantom events on the alert side
+Ingest publishes before its COMMIT ([ADR 0001](docs/adr/0001-publish-before-commit.md)), so in
+rare cases a `rule_match` reaches alert-service for an observation whose commit then failed.
+- **alert-service does not check for this.** It never reads ingest's tables (§3). An alert
+  keeps its own copy of every contributing observation (`alert_observations`), so alert
+  details still work and nothing throws.
+- **Why no `verified` flag:** a lookup at open time would almost always find the row (the
+  commit finishes milliseconds after publishing, before the event is consumed). It would also
+  tie alert-service to ingest's schema and to a shared database. The observation in a phantom
+  event was valid. When the sensor retries, ingest stores it and publishes it again with the
+  same deterministic `observation_id`; alert-service skips it as a duplicate, so it is not
+  counted twice.
+- **Visibility:** ingest counts phantom events in a metric, so their rate is measurable.
+- **With more time:** a transactional outbox in ingest (events written in the same
+  transaction and published by a relay after commit) removes phantom events completely.
 
 ---
 
