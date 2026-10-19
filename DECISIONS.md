@@ -344,17 +344,72 @@ ufw denies all incoming traffic except SSH (22) and HTTP (80).
 - **Verified:** after `multipass restart` all containers came back healthy with no manual step;
   from the host only 22 and 80 answer (5432, 6379, 8000 closed).
 
-## 9. CI/CD [TODO]
+## 9. CI/CD
 
-- Reaching a local VM: self-hosted runner on the VM (outbound connection to GitHub, no
-  inbound ports needed).
+```
+push / PR ──> CI (GitHub-hosted): lint │ unit tests ×2 │ integration tests ×2
+                 │ green, push to main
+                 v
+Deploy:  build (GitHub-hosted) ──> GHCR  rf-{ingest,alert}-service:<commit sha>
+         deploy (self-hosted on VM): pull that tag, compose up
+         verify (self-hosted on VM): smoke test ──fail──> automatic rollback, pipeline red
+```
+
+### 9.1 Reaching a local VM: self-hosted runner
+The VM is not reachable from the internet, so GitHub cannot connect to it. A self-hosted
+runner on the VM connects **out** to GitHub and picks up jobs; no inbound port, tunnel or
+SSH key is needed. It runs as a systemd service (starts on boot), registered by
+`infra/register-runner.ps1` with a one-time token that is never stored in the repository.
+- **Alternatives rejected:** a tunnel (ngrok / Cloudflare / Tailscale) plus SSH from a hosted
+  runner exposes the VM and needs an SSH private key in GitHub Secrets; a pull agent
+  (Watchtower) polling GHCR deploys without a verify stage in the pipeline.
 - **Security:** a self-hosted runner on a public repo lets a malicious PR run code on the VM.
-  PR CI runs on GitHub-hosted runners; only the deploy job on `push` to `main` uses the
-  self-hosted runner. The repository is **private**, so outside contributors cannot open PRs
-  that reach the runner; reviewers are given read access at submission.
-- Image tagging (commit SHA), deploy, smoke test.
-- Rollback: `workflow_dispatch` with an image tag input.
-- Secrets handling.
+  CI (including PRs) runs on GitHub-hosted runners only. The self-hosted jobs run from
+  `workflow_run` (the workflow file on `main`, never a PR's copy) or `workflow_dispatch`
+  (needs write access). The repository is **private**, so outside contributors cannot open PRs;
+  reviewers are given read access at submission.
+
+### 9.2 CI
+- Three jobs: `lint`, `unit-tests`, `integration-tests`. Branch protection on `main` requires
+  all of them, so a failing test blocks the merge.
+- **Per service:** ingest and alert pin different library versions (each has its own image),
+  so one shared `pip install` is impossible. Each test job runs once per service in its own
+  environment, matching what runs in production. The simulator tests run with ingest.
+- **Integration tests** carry a `pytest.mark.integration` marker and run against Postgres and
+  Redis service containers. Locally they skip without their env vars; in CI a skip means
+  misconfiguration, so the job **fails on any skip** instead of passing green with 0 tests run.
+
+### 9.3 Build, deploy, verify
+- **Tag = full commit SHA**, never `latest`: what runs on the VM maps to exactly one commit,
+  and old versions stay in GHCR for rollback. The image is built once in CI and the VM only
+  pulls it, so the tested artifact is the deployed artifact.
+- **Deploy** checks out the same commit (compose file and nginx config match the images) and
+  runs `infra/vm-release.sh`: pull first (a missing image leaves the running stack untouched),
+  then `compose up --no-build`. Only the changed services are recreated; nginx finds the new
+  containers through `resolve` (§8.5).
+- **Verify** (`infra/smoke-test.sh`): both containers run the expected tag, `/health` is 200
+  within 2 minutes (DB, Redis and alert-service background tasks), and one real read through
+  nginx per service. Runs on the VM, so it tests the deployed stack through nginx.
+- One deployment at a time (`concurrency`, never cancelled midway).
+
+### 9.4 Rollback
+- **Automatic:** if the smoke test fails, the verify job redeploys the previous tag
+  (`.previous-tag` on the VM), smoke-tests it, and still fails the pipeline so the bad commit
+  is visible.
+- **Manual (demo):** Actions → Deploy → Run workflow → `image_tag` = an earlier commit SHA. It
+  skips the build and deploys that image from GHCR with the same verify stage. About a minute,
+  no rebuild.
+- **Without GitHub:** on the VM, `/opt/rf-alert-manager/infra/vm-release.sh "$(cat .previous-tag)"`.
+- **Limit:** rollback changes code, not data. Schema changes are additive (`CREATE ... IF NOT
+  EXISTS`); a destructive migration would need its own down-migration.
+
+### 9.5 Secrets
+- **Registry:** the built-in `GITHUB_TOKEN` (`packages: write` for build, `packages: read`
+  for deploy), short-lived and scoped to the run. No personal access token, nothing in Secrets.
+- **Database password:** generated on the VM at first deploy and kept only in
+  `/opt/rf-alert-manager/.env` (mode 600). It never passes through GitHub.
+- **Runner token:** one-time, used once at registration.
+- gitleaks runs in pre-commit to catch secrets committed by mistake.
 
 ## 10. Not production-ready [TODO]
 

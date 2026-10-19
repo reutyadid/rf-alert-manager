@@ -57,3 +57,25 @@ powershell -ExecutionPolicy Bypass -File infra\destroy-vm.ps1   # delete the VM
 - The first deploy creates `/opt/rf-alert-manager/.env` on the VM with a random Postgres
   password; later deploys keep it.
 - The VM's IP can change after a host reboot; `multipass list` or `launch-vm.ps1` shows it.
+
+## CI/CD (GitHub Actions)
+
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `CI` (`.github/workflows/ci.yml`) | every push and PR | lint, unit tests and integration tests (Postgres + Redis), per service |
+| `Deploy` (`.github/workflows/deploy.yml`) | CI green on `main` | build images tagged with the commit SHA → GHCR → deploy on the VM → smoke test (auto-rollback on failure) |
+| `Deploy` (manual) | Actions → Deploy → Run workflow | **rollback / redeploy**: deploys `image_tag` (an earlier commit SHA) from GHCR |
+
+One-time setup:
+
+1. Create and deploy the VM once (see above): `launch-vm.ps1`, then `deploy-vm.ps1` (creates `.env`).
+2. Register the VM as a runner: GitHub → Settings → Actions → Runners → New self-hosted runner
+   (Linux), copy the token (valid 1 h), then
+   `powershell -ExecutionPolicy Bypass -File infra\register-runner.ps1 -Token <token>`.
+3. Branch protection on `main`: require the `lint`, `unit-tests` and `integration-tests` checks.
+
+Rollback without GitHub (on the VM):
+
+```bash
+cd /opt/rf-alert-manager && infra/vm-release.sh "$(cat .previous-tag)"
+```
