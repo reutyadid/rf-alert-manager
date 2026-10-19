@@ -36,7 +36,6 @@ class Settings(BaseSettings):
     sweep_interval_s: float = Field(default=5, gt=0)
     max_clock_skew_s: float = Field(default=60, gt=0)
     log_level: str = "INFO"
-    rule_matches_stream: str = "rule_matches"
     consumer_group: str = "alert-service"
     port: int = 8000
 
@@ -106,7 +105,6 @@ def build_app(settings: Settings) -> FastAPI:
         consumer = RedisMatchConsumer(
             client,
             service,
-            stream=settings.rule_matches_stream,
             group=settings.consumer_group,
             consumer=settings.consumer_group,
         )
