@@ -61,29 +61,52 @@ Each service:
 - Batch: all or nothing. If any item is invalid, reject the whole batch and store nothing
   (422, listing every invalid item with index and reason). A valid batch returns 200 with
   the accepted count.
+- Timestamps with any UTC offset are accepted and converted to UTC; naive timestamps are rejected.
+- A timestamp more than `MAX_CLOCK_SKEW_S` (default 60 s) ahead of the server clock (injected
+  `Clock`) is invalid → 422 (same setting and default as alert-service's drop).
 - Duplicates: unique on `(sensor_id, timestamp, frequency_mhz)`; duplicates are skipped
   (`ON CONFLICT DO NOTHING`) and NOT republished.
+- `observation_id` is deterministic:
+  `uuid5(OBSERVATION_NAMESPACE, f"{sensor_id}|{timestamp}|{frequency_mhz}")`, with inputs
+  canonical before hashing: timestamp as UTC `YYYY-MM-DDTHH:MM:SS[.ffffff]Z`, frequency rounded
+  to 6 decimals and formatted `.6f` (also stored rounded to 6 decimals, so the DB key and the id agree).
+- Order per request: validate → BEGIN → insert (`RETURNING` new rows only) → upsert sensors
+  (`last_seen` = max event time) → evaluate → XADD → COMMIT. Publish inside the DB
+  transaction, before COMMIT (at-least-once; alert-service dedupes by `observation_id`).
 
 ### Rules
+- ingest-service owns the rules table and all `/api/v1/rules` endpoints. alert-service never
+  reads the rules table; everything it needs comes inside the event.
 - Rule fields as in the task, plus optional `max_gap_s` (default from settings).
 - YAML file is a seed: loaded at startup ONLY if the rules table is empty. DB is the source of truth.
 - `power_threshold` match = observation inside `[band.min_mhz, band.max_mhz]` AND `power_dbm > threshold_dbm`.
 - Observations that do not match are never published (so weak observations never affect alert state).
+- Disabled or deleted rule: ingest simply stops publishing matches for it. Its open alerts
+  auto-resolve in alert-service after `resolve_after_s`. No extra message is sent.
 
-### rule_match event (versioned contract)
+### rule_match event (contract shared with alert-service, must match exactly)
+Stream `rule_matches`; each entry is `XADD rule_matches * data <JSON>`:
 ```json
 {
-  "schema_version": 1,
-  "observation_id": "...",
-  "rule_id": "...",
-  "sensor_id": "...",
-  "timestamp": "...Z",
+  "observation_id": "<uuid5>",
+  "rule_id": "rule-ism-high-power",
+  "sensor_id": "sensor-03",
+  "timestamp": "2026-10-06T10:15:30Z",
   "frequency_mhz": 2437.0,
   "power_dbm": -42.5,
-  "rule": {"min_duration_s": 10, "max_gap_s": 3, "resolve_after_s": 60, "severity": "HIGH"}
+  "rule": {
+    "min_duration_s": 10,
+    "max_gap_s": 5,
+    "resolve_after_s": 60,
+    "severity": "HIGH"
+  }
 }
 ```
-Rule parameters travel inside the event so alert-service never reads the rules table.
+- `rule` holds the rule's values at evaluation time, so alert-service never reads the rules table.
+- `max_gap_s` is always present: if the rule does not set it, ingest fills in `DEFAULT_MAX_GAP_S`
+  before publishing. alert-service never applies defaults.
+- `timestamp` is always normalized to UTC with a `Z` suffix.
+- No `schema_version` (versioning deferred, see DECISIONS §3).
 
 ### Signal key
 `compute_signal_key(rule_id, frequency_mhz)` = `rule_id` + frequency rounded to
@@ -123,7 +146,8 @@ in the composition root. `.env.example` is committed; `.env` is never committed.
 No secrets in code, compose files, images or workflow files (use GitHub Secrets).
 
 Key settings: `DATABASE_URL`, `REDIS_URL`, `RULES_FILE`, `FREQ_TOLERANCE_MHZ`,
-`DEFAULT_MAX_GAP_S`, `ALLOWED_LATENESS_S`, `IDLE_TIMEOUT_S`, `SWEEP_INTERVAL_S`, `LOG_LEVEL`.
+`DEFAULT_MAX_GAP_S`, `ALLOWED_LATENESS_S`, `IDLE_TIMEOUT_S`, `SWEEP_INTERVAL_S`, `LOG_LEVEL`,
+`MAX_BATCH_SIZE` (ingest), `MAX_CLOCK_SKEW_S`.
 
 ## Operational conventions
 - Logs: structured JSON to stdout only. Rotation is configured in compose (json-file max-size/max-file).

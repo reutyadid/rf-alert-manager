@@ -27,6 +27,11 @@ Asynchronous, persistent log with consumer groups and explicit acknowledgements:
 that was not acked is redelivered after a restart. One lightweight container.
 - **Kafka** rejected: correct tool at large scale, but heavy to run on a single VM for this load.
 - **RabbitMQ** viable, but adds a component with no advantage for a single stream and one consumer.
+- **Bounded stream:** ingest appends with `MAXLEN ~100000`, so Redis memory cannot grow without
+  limit. Trimming can drop entries that alert-service has not acked yet, but only if it is down
+  long enough for about 100k matches to pile up (hours at simulator rates). Within that window,
+  unacked events are redelivered as described above. **With more time:** trim by the consumer
+  group's acked position (`XTRIM MINID`) instead of a fixed length.
 
 ---
 
@@ -47,8 +52,12 @@ broker client.
   rule independently and publishes a `rule_match` event per match.
 - **alert-service is stateful:** all time-dependent decisions (min duration, dedup,
   auto-resolve) live in one place.
-- Rule parameters are copied into each event, so alert-service never reads the rules table and
-  the services stay decoupled. Events carry `schema_version` for safe evolution.
+- **Rule ownership:** ingest-service owns the rules table and all `/api/v1/rules` endpoints.
+  Rule parameters are copied into each event (values at evaluation time, with `max_gap_s`
+  already defaulted), so alert-service never reads the rules table and never applies defaults.
+  The services stay decoupled.
+- **Versioning deferred:** the event contract (see CLAUDE.md) is fixed for this task and has no
+  `schema_version`. With more time, add one so consumers can reject unknown shapes.
 
 ### 3.1 How I read "one ingests observations and evaluates rules; a second receives and manages alerts"
 
@@ -146,6 +155,12 @@ direction).
 ### 4.7 Rule changes while a run is pending
 New parameters apply from the next matching event onward (they travel in each event).
 
+**Disabled or deleted rule:** ingest simply stops publishing matches for it. Its open alerts
+auto-resolve through the normal `resolve_after_s` path. No control message is sent between
+the services.
+- **Trade-off:** an alert of a deleted rule stays OPEN for up to `resolve_after_s` (plus the
+  allowed lateness) after the last match.
+
 ---
 
 ## 5. Rules: YAML is a seed, the database is the source of truth
@@ -155,6 +170,8 @@ through the API and persist across restarts. The pipeline redeploys on every mer
 "file wins on startup" approach would revert operator changes on every deploy. Re-adding
 missing rules on each startup was rejected because it resurrects rules deleted through the API.
 - **Trade-off:** editing the YAML after first boot has no effect unless the rules table is reset.
+- A missing or invalid `RULES_FILE` stops startup. A wrong path would otherwise start the
+  service with zero rules, and no alert would ever open.
 
 ---
 
@@ -162,6 +179,20 @@ missing rules on each startup was rejected because it resurrects rules deleted t
 
 - Validation per the task, plus `lat` in [-90, 90] and `lon` in [-180, 180] (not specified in
   the task, but an out-of-range coordinate is clearly invalid).
+- Timestamps with any UTC offset (e.g. `+03:00`) are accepted and converted to UTC: it is
+  the same instant, and rejecting it gains nothing. Naive timestamps (no offset) are rejected
+  because the instant is ambiguous.
+- **Future timestamps:** a timestamp more than `MAX_CLOCK_SKEW_S` (default 60 s) ahead of the
+  server clock is invalid (422, counted like any invalid item, so the whole batch is rejected).
+  alert-service drops such events anyway, to stop one bad sensor clock from pushing the
+  watermark forward, so storing them would only keep data that can never affect alerts. A 422
+  tells the sensor its clock is wrong. Both services use the same setting name and default;
+  alert-service keeps its own check as a second line of defence. The server time comes from an
+  injected `Clock`.
+  - **Trade-off:** a server clock that is behind rejects valid observations, so the VM must run
+    NTP. Past timestamps are not limited; old data is stored, and alert-service handles lateness.
+- Sensor `last_seen` is the latest **event time** reported by the sensor (`GREATEST`), not the
+  arrival time, consistent with the rest of the system. A delayed batch does not move it backwards.
 - **Batch: all or nothing.** If any item is invalid, the whole batch is rejected and nothing
   is stored. An invalid item usually points to a problem in the sensor itself (calibration,
   firmware or serialization), so the other readings in the same batch are suspect too.
@@ -170,6 +201,12 @@ missing rules on each startup was rejected because it resurrects rules deleted t
   with any invalid item returns **422** and lists **every** invalid item with index and
   reason, so the sensor can fix all of them in one round. A single invalid observation
   returns 422. Duplicates are not errors: they are skipped as in §7.
+- **Batch size limit:** at most `MAX_BATCH_SIZE` items (default 1000) per request; a larger
+  request gets **413** and nothing is stored. A batch is one transaction, so an unbounded array
+  would hold a DB connection and locks for an unbounded time. An empty array is accepted as a
+  no-op (`accepted: 0`).
+- A deadlock or serialization conflict returns **503**, like an unreachable DB, so the sensor
+  retries. Observations are inserted in a fixed key order so overlapping batches do not deadlock.
 - **Alternative considered: partial acceptance** (store valid items, reject invalid ones).
   Rejected because it stores readings from a sensor that is likely misbehaving.
 - **Trade-off:** one bad reading drops valid readings in the same batch, possibly including a
@@ -187,6 +224,28 @@ make them inevitable.
 - alert-service: an event whose `observation_id` already contributed to the alert is skipped.
 - Together: at-least-once delivery with an idempotent consumer. Two different sensors
   reporting the same frequency at the same second are not duplicates.
+
+### 7.1 Publish order and deterministic observation_id
+Full record, known gap and how it is measured: [ADR 0001](docs/adr/0001-publish-before-commit.md).
+
+Per request: validate → BEGIN → `INSERT … ON CONFLICT DO NOTHING RETURNING` (new rows only)
+→ upsert sensors → evaluate → `XADD` (one pipeline) → COMMIT.
+- **Redis fails:** the transaction rolls back and the client gets 503. A retry stores and
+  publishes cleanly.
+- **XADD succeeded but COMMIT failed** (or the process crashed between them): events exist
+  for rows that were not stored. The retry stores the rows and publishes again, but with the
+  **same** `observation_id`, so alert-service skips the repeat. At-least-once delivery with an
+  idempotent consumer, no outbox table.
+- `observation_id = uuid5(namespace, "sensor_id|timestamp|frequency")` over canonical inputs:
+  timestamp as UTC `YYYY-MM-DDTHH:MM:SS[.ffffff]Z`, frequency rounded to 6 decimals and
+  formatted `.6f`. The frequency is stored rounded the same way, so the DB unique key and the
+  id always agree. Equivalent inputs (`Z` / `+00:00` / another offset at the same instant,
+  `2437` / `2437.0`) give the same id.
+- **Alternative rejected: commit, then publish.** If Redis fails after the commit, the events
+  are lost for good: the retry sees only duplicates, which are never republished.
+- **Alternative rejected: transactional outbox.** It closes the gap fully, but adds a table and
+  a relay process; the deterministic id already makes the remaining case harmless.
+- **Cost:** the DB transaction stays open for one Redis round-trip (about 1 ms on the same host).
 
 ---
 
@@ -213,3 +272,5 @@ make them inevitable.
 ## 10. Not production-ready [TODO]
 
 ## 11. What I would improve with more time [TODO]
+
+- Add `schema_version` to the `rule_match` event so consumers can reject unknown shapes (§3).

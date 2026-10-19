@@ -1,0 +1,129 @@
+"""Observation endpoints. A batch is all or nothing (DECISIONS §6)."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Body, Query, Request
+from pydantic import ValidationError
+
+from ingest_service.api import metrics
+from ingest_service.api.errors import ApiError, field_path
+from ingest_service.api.schemas import IngestResponse, IsoTimestamp, ObservationIn, ObservationOut
+from ingest_service.domain.models import Observation, ObservationQuery
+from ingest_service.domain.validation import DEFAULT_MAX_CLOCK_SKEW_S, is_too_far_in_future
+
+router = APIRouter(prefix="/api/v1/observations", tags=["observations"])
+
+DEFAULT_MAX_BATCH_SIZE = 1000
+
+
+def parse_observations(
+    payload: Any,
+    *,
+    now: datetime,
+    max_clock_skew_s: float = DEFAULT_MAX_CLOCK_SKEW_S,
+    max_batch_size: int = DEFAULT_MAX_BATCH_SIZE,
+) -> list[Observation]:
+    """Validate a single observation or a batch. Raises ApiError listing every invalid item.
+
+    `now` is the server time used to reject timestamps too far in the future.
+    """
+    if isinstance(payload, dict):
+        items = [payload]
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        raise ApiError(422, "validation_error", "body must be an observation or an array of them")
+    if len(items) > max_batch_size:
+        raise ApiError(
+            413,
+            "batch_too_large",
+            f"batch has {len(items)} observations; the maximum is {max_batch_size}",
+        )
+
+    observations: list[Observation] = []
+    details: list[dict] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            details.append({"index": index, "field": "", "reason": "must be an object"})
+            continue
+        try:
+            observation = ObservationIn.model_validate(item).to_domain()
+        except ValidationError as exc:
+            details.extend(
+                {"index": index, "field": field_path(e["loc"]), "reason": e["msg"]}
+                for e in exc.errors()
+            )
+            continue
+        if is_too_far_in_future(observation.timestamp, now, max_clock_skew_s):
+            details.append(
+                {
+                    "index": index,
+                    "field": "timestamp",
+                    "reason": f"more than {max_clock_skew_s:g} s in the future "
+                    "(check the sensor clock)",
+                }
+            )
+            continue
+        observations.append(observation)
+
+    if details:
+        bad = len({d["index"] for d in details})
+        raise ApiError(
+            422,
+            "validation_error",
+            f"{bad} of {len(items)} observations are invalid; nothing was stored",
+            details,
+        )
+    return observations
+
+
+@router.post("", response_model=IngestResponse)
+async def post_observations(request: Request, payload: Annotated[Any, Body()]) -> IngestResponse:
+    try:
+        state = request.app.state
+        observations = parse_observations(
+            payload,
+            now=state.clock.now(),
+            max_clock_skew_s=state.max_clock_skew_s,
+            max_batch_size=state.max_batch_size,
+        )
+    except ApiError:
+        metrics.BATCHES_REJECTED.inc()
+        raise
+    result = await request.app.state.services.ingest.ingest(observations)
+    metrics.OBSERVATIONS_RECEIVED.inc(len(observations))
+    metrics.OBSERVATIONS_DUPLICATE.inc(result.duplicates)
+    metrics.RULE_MATCHES_PUBLISHED.inc(result.published)
+    return IngestResponse(accepted=result.accepted, duplicates=result.duplicates)
+
+
+@router.get("", response_model=list[ObservationOut])
+async def get_observations(
+    request: Request,
+    sensor_id: str | None = None,
+    min_frequency_mhz: Annotated[float | None, Query(ge=0)] = None,
+    max_frequency_mhz: Annotated[float | None, Query(ge=0)] = None,
+    start: Annotated[IsoTimestamp | None, Query(alias="from")] = None,
+    end: Annotated[IsoTimestamp | None, Query(alias="to")] = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> list[ObservationOut]:
+    invalid = []
+    if None not in (min_frequency_mhz, max_frequency_mhz) and min_frequency_mhz > max_frequency_mhz:
+        invalid.append({"field": "min_frequency_mhz", "reason": "must be <= max_frequency_mhz"})
+    if None not in (start, end) and start > end:
+        invalid.append({"field": "from", "reason": "must be <= to"})
+    if invalid:
+        raise ApiError(422, "validation_error", "request is invalid", invalid)
+    query = ObservationQuery(
+        sensor_id=sensor_id,
+        min_frequency_mhz=min_frequency_mhz,
+        max_frequency_mhz=max_frequency_mhz,
+        start=start,
+        end=end,
+        limit=limit,
+    )
+    rows = await request.app.state.services.observations.query(query)
+    return [ObservationOut.from_domain(o) for o in rows]
