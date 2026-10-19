@@ -13,6 +13,7 @@ DATABASE_URL = os.environ.get("ALERT_TEST_DATABASE_URL")
 
 pytestmark = [
     pytest.mark.anyio,
+    pytest.mark.integration,
     pytest.mark.skipif(not DATABASE_URL, reason="ALERT_TEST_DATABASE_URL not set"),
 ]
 

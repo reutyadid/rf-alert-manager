@@ -17,6 +17,7 @@ STREAM = "test_rule_matches"
 
 pytestmark = [
     pytest.mark.anyio,
+    pytest.mark.integration,
     pytest.mark.skipif(not REDIS_URL, reason="ALERT_TEST_REDIS_URL not set"),
 ]
 

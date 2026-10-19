@@ -22,9 +22,12 @@ from ingest_service.tests.builders import a_rule, an_observation, observation_js
 DB_URL = os.environ.get("INGEST_IT_DATABASE_URL")
 REDIS_URL = os.environ.get("INGEST_IT_REDIS_URL")
 
-pytestmark = pytest.mark.skipif(
-    not (DB_URL and REDIS_URL), reason="INGEST_IT_DATABASE_URL / INGEST_IT_REDIS_URL not set"
-)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not (DB_URL and REDIS_URL), reason="INGEST_IT_DATABASE_URL / INGEST_IT_REDIS_URL not set"
+    ),
+]
 
 
 async def _reset() -> None:
