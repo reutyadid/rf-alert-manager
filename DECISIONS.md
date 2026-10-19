@@ -290,7 +290,7 @@ rare cases a `rule_match` reaches alert-service for an observation whose commit 
 
 ---
 
-## 8. Containers and VM [TODO: containers]
+## 8. Containers and VM
 
 ### 8.1 VM: local Ubuntu 24.04 with Multipass + cloud-init
 - **Why local:** free, no cloud account or billing, and fully reproducible: `infra/launch-vm.ps1`
@@ -319,7 +319,30 @@ ufw denies all incoming traffic except SSH (22) and HTTP (80).
   at most 30 MB of logs.
 - systemd journal capped at 200 MB (`SystemMaxUse`).
 
-### 8.5 Containers and persistence [TODO]
+### 8.5 Containers and persistence
+- **One compose file** (`docker-compose.yml`) for local runs and the VM: Postgres 16, Redis 7,
+  both services and nginx. Every dependency has a healthcheck and `depends_on:
+  condition: service_healthy`; the services also retry their connections on startup.
+- **Persistence:** named volumes `pgdata` (alerts, observations, rules) and `redisdata`.
+  Redis runs with AOF (`--appendonly yes`) so unacked `rule_match` entries survive a Redis
+  restart; without it the redelivery promised in §1 only holds while Redis stays up.
+- **Images:** multi-stage, `python:3.12-slim`, non-root user (uid 10001), stdlib-only
+  HEALTHCHECK. Each service has both `image: ghcr.io/...:${IMAGE_TAG}` and `build:`, so the same
+  file builds locally and pulls a SHA-tagged image in the pipeline (§9).
+- **Secrets:** `.env` is never committed. On the VM, the first deploy creates it from
+  `.env.example` with a random Postgres password generated on the VM, so the password never
+  leaves the VM.
+- **nginx routing:** `/api/v1/alerts` → alert-service, the rest of `/api/v1` → ingest-service.
+  Both services expose `/health` and `/metrics`, so nginx serves them as `/ingest/{health,metrics}`
+  and `/alert/{health,metrics}`. **`/health` is combined:** 200 only if both services are healthy
+  (an `auth_request` to alert-service, then ingest-service), so the smoke test checks one URL.
+  Upstreams use `resolve`, so a container recreated by a deploy (new IP) is found without
+  restarting nginx.
+- **Part 2 deploy** (`infra/deploy-vm.ps1`): `git archive HEAD` → `multipass transfer` →
+  `infra/vm-deploy.sh` on the VM builds and starts the stack and waits for `/health`. Only
+  committed code is deployed. Part 3 replaces the build on the VM with pulling the CI image.
+- **Verified:** after `multipass restart` all containers came back healthy with no manual step;
+  from the host only 22 and 80 answer (5432, 6379, 8000 closed).
 
 ## 9. CI/CD [TODO]
 
