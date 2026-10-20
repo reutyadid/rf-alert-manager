@@ -46,6 +46,18 @@ for _ in $(seq 1 30); do
     sleep 3
 done
 [ "${grafana:-0}" = 1 ] || fail "GET /grafana/api/health not 200 after 90 s"
+# Like a browser: session cookie + Origin. Grafana checks the Origin only for cookie sessions,
+# so this is what catches a proxy that does not pass the Host header ("origin not allowed").
+jar="$(mktemp)"
+trap 'rm -f "$jar"' EXIT
+password="$(docker compose exec -T grafana printenv GF_SECURITY_ADMIN_PASSWORD)"
+curl -fsS -o /dev/null -c "$jar" -H "Origin: $BASE" -H "Content-Type: application/json" \
+    -X POST "$BASE/grafana/login" -d "{\"user\":\"admin\",\"password\":\"$password\"}" \
+    || fail "Grafana login"
+curl -fsS -o /dev/null -b "$jar" -H "Origin: $BASE" -H "Content-Type: application/json" \
+    -X POST "$BASE/grafana/api/ds/query" \
+    -d '{"queries":[{"refId":"A","datasource":{"uid":"prometheus"},"expr":"up","instant":true}]}' \
+    || fail "Grafana dashboard query from a browser session"
 for _ in $(seq 1 20); do
     targets="$(docker compose exec -T prometheus \
         wget -qO- 'http://127.0.0.1:9090/api/v1/targets?state=active' || true)"
