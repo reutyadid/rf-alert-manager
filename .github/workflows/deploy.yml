@@ -67,9 +67,13 @@ jobs:
       contents: read
       packages: read
     steps:
+      # Remembered before anything changes, so a failed deploy can go back to it.
+      - name: Record the running version
+        id: running
+        run: echo "tag=$(sed -n 's/^IMAGE_TAG=//p' /opt/rf-alert-manager/.env)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
         with:
-          # Compose and nginx config of the same commit as the images.
+          # Compose, nginx and observability config of the same commit as the images.
           ref: ${{ env.TAG }}
       - uses: docker/login-action@v3
         with:
@@ -78,6 +82,22 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Deploy ${{ env.TAG }}
         run: bash infra/vm-release.sh "$TAG" "$GITHUB_WORKSPACE"
+      # Automatic rollback when the deploy itself fails (e.g. a container cannot start):
+      # redeploy the version that was running, with that commit's own config files.
+      - name: Check out the running version
+        if: failure() && steps.running.outputs.tag != ''
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.running.outputs.tag }}
+          path: rollback
+      - name: Roll back to ${{ steps.running.outputs.tag }}
+        if: failure() && steps.running.outputs.tag != ''
+        env:
+          RUNNING: ${{ steps.running.outputs.tag }}
+        run: |
+          echo "::warning::deploy of $TAG failed, rolling back to $RUNNING"
+          bash rollback/infra/vm-release.sh "$RUNNING" "$GITHUB_WORKSPACE/rollback"
+          bash /opt/rf-alert-manager/infra/smoke-test.sh "$RUNNING"
 
   verify:
     needs: deploy
@@ -88,18 +108,29 @@ jobs:
     steps:
       - name: Smoke test
         run: bash /opt/rf-alert-manager/infra/smoke-test.sh "$TAG"
-      # Automatic rollback: the new version is unhealthy, so go back to the previous one.
-      # The pipeline still fails, so the bad commit is visible.
+      # Automatic rollback: the new version is unhealthy, so go back to the previous one,
+      # with that commit's own config files. The pipeline still fails, so the bad commit is
+      # visible.
+      - name: Read the previous version
+        id: previous
+        if: failure()
+        run: echo "tag=$(cat /opt/rf-alert-manager/.previous-tag)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        if: failure()
+        with:
+          ref: ${{ steps.previous.outputs.tag }}
+          path: rollback
       - uses: docker/login-action@v3
         if: failure()
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Roll back to the previous version
+      - name: Roll back to ${{ steps.previous.outputs.tag }}
         if: failure()
+        env:
+          PREVIOUS: ${{ steps.previous.outputs.tag }}
         run: |
-          previous="$(cat /opt/rf-alert-manager/.previous-tag)"
-          echo "::warning::smoke test failed for $TAG, rolling back to $previous"
-          bash /opt/rf-alert-manager/infra/vm-release.sh "$previous"
-          bash /opt/rf-alert-manager/infra/smoke-test.sh "$previous"
+          echo "::warning::smoke test failed for $TAG, rolling back to $PREVIOUS"
+          bash rollback/infra/vm-release.sh "$PREVIOUS" "$GITHUB_WORKSPACE/rollback"
+          bash /opt/rf-alert-manager/infra/smoke-test.sh "$PREVIOUS"

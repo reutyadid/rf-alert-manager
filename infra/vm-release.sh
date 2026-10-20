@@ -20,11 +20,15 @@ if [ ! -f "$APP_DIR/.env" ]; then
     exit 1
 fi
 
-# Deployment files for this version (compose, nginx config, scripts). .env is never copied.
+# Deployment files for this version: everything docker-compose.yml mounts, plus the scripts.
+# .env is never copied. A bind-mount source missing here would be created by Docker as an
+# empty root-owned directory and the container would fail to start.
 if [ "$SRC" != "$APP_DIR" ]; then
     cp "$SRC/docker-compose.yml" "$SRC/.env.example" "$APP_DIR/"
-    rm -rf "$APP_DIR/nginx" "$APP_DIR/infra"
-    cp -r "$SRC/nginx" "$SRC/infra" "$APP_DIR/"
+    for dir in nginx infra observability; do
+        rm -rf "${APP_DIR:?}/$dir"
+        cp -r "$SRC/$dir" "$APP_DIR/"
+    done
 fi
 cd "$APP_DIR"
 bash infra/env-sync.sh "$APP_DIR"
