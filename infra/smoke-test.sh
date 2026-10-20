@@ -40,7 +40,12 @@ curl -fsS -o /dev/null "$BASE/api/v1/alerts" || fail "GET /api/v1/alerts"
 echo "ok: /api/v1/rules and /api/v1/alerts"
 
 # 4. Observability: Grafana is up behind nginx, and Prometheus scrapes both services.
-curl -fsS -o /dev/null "$BASE/grafana/api/health" || fail "GET /grafana/api/health"
+# Grafana takes 20-30 s to start after a (re)create.
+for _ in $(seq 1 30); do
+    curl -fsS -o /dev/null "$BASE/grafana/api/health" && grafana=1 && break
+    sleep 3
+done
+[ "${grafana:-0}" = 1 ] || fail "GET /grafana/api/health not 200 after 90 s"
 for _ in $(seq 1 20); do
     targets="$(docker compose exec -T prometheus \
         wget -qO- 'http://127.0.0.1:9090/api/v1/targets?state=active' || true)"

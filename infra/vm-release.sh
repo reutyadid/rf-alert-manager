@@ -20,6 +20,22 @@ if [ ! -f "$APP_DIR/.env" ]; then
     exit 1
 fi
 
+# Config folder -> the container that bind-mounts it.
+declare -A CONFIG_OWNER=([nginx]=nginx [observability/prometheus]=prometheus [observability/grafana]=grafana)
+
+config_hash() {
+    if [ -d "$APP_DIR/$1" ]; then
+        (cd "$APP_DIR" && find "$1" -type f -print0 | sort -z | xargs -0 -r sha256sum | sha256sum)
+    else
+        echo none
+    fi
+}
+
+declare -A before=()
+for dir in "${!CONFIG_OWNER[@]}"; do
+    before[$dir]="$(config_hash "$dir")"
+done
+
 # Deployment files for this version: everything docker-compose.yml mounts, plus the scripts.
 # .env is never copied. A bind-mount source missing here would be created by Docker as an
 # empty root-owned directory and the container would fail to start.
@@ -39,6 +55,16 @@ export IMAGE_TAG="$TAG"
 # Pull first: if the image does not exist, the running stack is left untouched.
 docker compose pull ingest-service alert-service
 docker compose up -d --no-build --remove-orphans
+
+# Compose does not recreate a container when only a mounted file changed, and the copy above
+# gives every file a new inode, so a running container would keep reading the old file.
+# Recreate the owner of each changed config folder (nginx: about 1 s of 502s, only then).
+for dir in "${!CONFIG_OWNER[@]}"; do
+    if [ "${before[$dir]}" != none ] && [ "${before[$dir]}" != "$(config_hash "$dir")" ]; then
+        echo "config changed in $dir: recreating ${CONFIG_OWNER[$dir]}"
+        docker compose up -d --no-build --no-deps --force-recreate "${CONFIG_OWNER[$dir]}"
+    fi
+done
 
 if [ "$current" != "$TAG" ]; then
     echo "$current" > .previous-tag
