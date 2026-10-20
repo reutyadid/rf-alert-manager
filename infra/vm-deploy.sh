@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Runs ON the VM. Unpacks a release archive into /opt/rf-alert-manager and (re)starts the stack.
 # Usage: vm-deploy.sh <release.tar>
-# .env is kept across deploys; on the first deploy it is created from .env.example with a
-# random Postgres password generated here, so the secret never leaves the VM.
+# .env is kept across deploys; infra/env-sync.sh creates it on the first deploy (secrets
+# generated here, so they never leave the VM) and adds keys that later versions introduce.
 set -euo pipefail
 
 ARCHIVE="${1:?usage: vm-deploy.sh <release.tar>}"
@@ -13,12 +13,7 @@ find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name .env ! -name .previous-tag -exec
 tar -xf "$ARCHIVE" -C "$APP_DIR"
 cd "$APP_DIR"
 
-if [ ! -f .env ]; then
-    password="$(openssl rand -hex 24)"
-    sed "s/change-me/${password}/g" .env.example > .env
-    chmod 600 .env
-    echo "created $APP_DIR/.env with a generated POSTGRES_PASSWORD"
-fi
+bash infra/env-sync.sh "$APP_DIR"
 
 docker compose up -d --build --remove-orphans
 

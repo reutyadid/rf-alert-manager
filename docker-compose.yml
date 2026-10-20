@@ -1,4 +1,5 @@
-# RF Alert Manager stack: nginx -> ingest-service / alert-service -> PostgreSQL + Redis.
+# RF Alert Manager stack: nginx -> ingest-service / alert-service -> PostgreSQL + Redis,
+# plus Prometheus (internal only) and Grafana (behind nginx at /grafana/).
 # Configuration comes from .env (copy .env.example). Only nginx publishes a port.
 #   Local:  docker compose up -d --build
 #   VM:     IMAGE_TAG=<commit sha> docker compose pull && docker compose up -d
@@ -83,6 +84,57 @@ services:
       retries: 3
     logging: *logging
 
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Bounded disk: whichever limit is reached first.
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=1GB
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    logging: *logging
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    restart: unless-stopped
+    # Only what Grafana needs; not env_file, so it never sees the database password.
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set in .env}
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/rf-alert-manager.json
+    # No volume: datasource and dashboard are provisioned from git on every start.
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    logging: *logging
+
 volumes:
   pgdata:
   redisdata:
+  promdata:

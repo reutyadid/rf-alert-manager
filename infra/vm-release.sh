@@ -27,6 +27,7 @@ if [ "$SRC" != "$APP_DIR" ]; then
     cp -r "$SRC/nginx" "$SRC/infra" "$APP_DIR/"
 fi
 cd "$APP_DIR"
+bash infra/env-sync.sh "$APP_DIR"
 
 current="$(sed -n 's/^IMAGE_TAG=//p' .env)"
 export IMAGE_TAG="$TAG"

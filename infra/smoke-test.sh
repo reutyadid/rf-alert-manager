@@ -39,4 +39,16 @@ rules="$(curl -fsS "$BASE/api/v1/rules")" || fail "GET /api/v1/rules"
 curl -fsS -o /dev/null "$BASE/api/v1/alerts" || fail "GET /api/v1/alerts"
 echo "ok: /api/v1/rules and /api/v1/alerts"
 
+# 4. Observability: Grafana is up behind nginx, and Prometheus scrapes both services.
+curl -fsS -o /dev/null "$BASE/grafana/api/health" || fail "GET /grafana/api/health"
+for _ in $(seq 1 20); do
+    targets="$(docker compose exec -T prometheus \
+        wget -qO- 'http://127.0.0.1:9090/api/v1/targets?state=active' || true)"
+    up="$(grep -o '"health":"up"' <<<"$targets" | wc -l)"
+    [ "$up" -ge 2 ] && break
+    sleep 3
+done
+[ "$up" -ge 2 ] || fail "Prometheus: $up of 2 scrape targets up"
+echo "ok: grafana, prometheus scraping 2/2 targets"
+
 echo "SMOKE TEST PASSED for $TAG"
