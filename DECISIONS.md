@@ -387,15 +387,27 @@ SSH key is needed. It runs as a systemd service (starts on boot), registered by
   runs `infra/vm-release.sh`: pull first (a missing image leaves the running stack untouched),
   then `compose up --no-build`. Only the changed services are recreated; nginx finds the new
   containers through `resolve` (§8.5).
+- **Mounted config changes** (nginx, Prometheus, Grafana) need a recreate: compose does not
+  recreate a container whose definition is unchanged, and copying the files gives them a new
+  inode, so the running container keeps reading the old file. The deploy hashes each config
+  folder before and after the copy and recreates its owner when it changed (nginx: about 1 s of
+  502s, only then). Found when the first Grafana deploy failed: nginx was still running its
+  Part 2 config.
 - **Verify** (`infra/smoke-test.sh`): both containers run the expected tag, `/health` is 200
   within 2 minutes (DB, Redis and alert-service background tasks), and one real read through
   nginx per service. Runs on the VM, so it tests the deployed stack through nginx.
 - One deployment at a time (`concurrency`, never cancelled midway).
 
 ### 9.4 Rollback
-- **Automatic:** if the smoke test fails, the verify job redeploys the previous tag
-  (`.previous-tag` on the VM), smoke-tests it, and still fails the pipeline so the bad commit
-  is visible.
+- **Automatic, in both failure cases**, and the pipeline still fails so the bad commit is
+  visible:
+  - **Deploy fails** (e.g. a container cannot start): the deploy job recorded the running tag
+    before changing anything and redeploys it.
+  - **Smoke test fails:** the verify job redeploys the previous tag (`.previous-tag`).
+  - Both check out **the commit of the version they go back to**, so its own compose, nginx and
+    observability files are used, not the new ones with old images.
+  - Shown for real by the first Grafana deploy (6d91b0f): the smoke test failed and the
+    pipeline went back to 82f9686, which passed its smoke test.
 - **Manual (demo):** Actions → Deploy → Run workflow → `image_tag` = an earlier commit SHA. It
   skips the build and deploys that image from GHCR with the same verify stage. About a minute,
   no rebuild.
