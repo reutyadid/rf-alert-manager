@@ -8,7 +8,7 @@ persistent strong emitters into alerts. See `ARCHITECTURE.md` and `DECISIONS.md`
 Requires Docker with compose.
 
 ```bash
-cp .env.example .env          # then set POSTGRES_PASSWORD (and the same value in DATABASE_URL)
+bash infra/env-sync.sh .      # creates .env from .env.example with generated passwords
 docker compose up -d --build
 curl http://localhost/health   # 200 only if both services are healthy
 ```
@@ -21,6 +21,20 @@ Endpoints (through nginx on port 80):
 | `/api/v1/alerts` | alert-service |
 | `/health` | combined health of both services |
 | `/ingest/health`, `/ingest/metrics`, `/alert/health`, `/alert/metrics` | per service |
+| `/grafana/` | Grafana dashboard (login `admin` / `GRAFANA_ADMIN_PASSWORD` from `.env`) |
+
+### Observability (Grafana + Prometheus)
+
+Open `http://localhost/grafana/` (or `http://<vm-ip>/grafana/`) and log in as `admin`. The
+**RF Alert Manager** dashboard is the home page: services, ingest rates, open alerts by
+severity, alerts opened/resolved and dropped events. It is provisioned from
+`observability/`; edit the JSON in git, not in the UI. Prometheus is internal only.
+
+Grafana password on the VM (generated at deploy):
+
+```bash
+multipass exec rf-vm -- grep GRAFANA_ADMIN_PASSWORD /opt/rf-alert-manager/.env
+```
 
 ## Simulator
 

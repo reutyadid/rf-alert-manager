@@ -19,6 +19,10 @@ flowchart LR
         redis -->|XREADGROUP alert-service| alert
         ingest --> pg
         alert --> pg
+        prom[(Prometheus<br/>internal)] -->|scrape /metrics| ingest
+        prom -->|scrape /metrics| alert
+        nginx -->|/grafana/| grafana[Grafana<br/>login]
+        grafana --> prom
     end
 ```
 
@@ -28,6 +32,8 @@ flowchart LR
 | **ingest-service** | validation, `observations`, `sensors`, `rules` tables, rule evaluation, publishing matches | decide whether an alert exists |
 | **alert-service** | pending runs, watermark, `alerts` and `alert_observations` tables, alert lifecycle, auto-resolve sweep | read ingest's tables (all it needs travels in the event) |
 | **Redis** | the `rule_matches` stream, consumer group `alert-service` (AOF on disk) | |
+| **Prometheus** | metrics of both services (scraped every 15 s, 7 days / 1 GB) | publish a port |
+| **Grafana** | the dashboard, provisioned from `observability/` (login required) | keep state: no volume, UI edits are not saved |
 | **PostgreSQL** | durable data for both services (separate tables, one database) | |
 
 Each service is layered the same way: `domain/` (pure Python logic and Protocols, no framework
@@ -199,7 +205,7 @@ flowchart LR
 - **VM:** created by `infra/launch-vm.ps1` with `infra/cloud-init.yaml` (Docker, ufw 22/80
   only, bounded logs). Docker and the runner start on boot; containers use
   `restart: unless-stopped`.
-- **Persistence:** named volumes `pgdata` and `redisdata`. `.env` (with the generated database
+- **Persistence:** named volumes `pgdata`, `redisdata` and `promdata` (metrics, 7 days / 1 GB). `.env` (with the generated database
   password) lives only on the VM.
 - **Pipeline:** CI on every push/PR → on green `main`, build both images tagged with the commit
   SHA → the runner on the VM pulls exactly that tag → smoke test → automatic rollback to the

@@ -440,7 +440,8 @@ Known gaps, most of them deliberate for the 4-hour scope. Each links to where it
 - **Local VM:** its IP can change after a host reboot (§8.1), and the laptop must be on for the
   pipeline to deploy.
 - **Rollback changes code, not data** (§9.4).
-- **No alerting on the system itself:** metrics are exposed but nothing scrapes or alerts on them.
+- **No alerting on the system itself:** Prometheus scrapes the metrics and Grafana shows them
+  (§12), but no alert rules or Alertmanager notify anyone when something breaks.
 
 **Features**
 - Only the required `power_threshold` rule type. The optional `multi_sensor` rule was not built;
@@ -469,9 +470,9 @@ In priority order: the first items close real failure modes, the rest are featur
    changed is durable, closing the crash-before-commit gap (§4.6).
 3. **Auth and TLS:** API keys per sensor for ingest, a user login for rules and alert actions,
    HTTPS in nginx; `/metrics` on an internal network only.
-4. **Observability:** Prometheus and Grafana with a dashboard provisioned as code, and alerts on
-   `late_observations_dropped_total`, `future_observations_dropped_total`, consumer lag and
-   `ingest_phantom_candidates_total`.
+4. **Alerting on the system:** Prometheus alert rules and Alertmanager on
+   `late_observations_dropped_total`, `future_observations_dropped_total`, consumer lag,
+   `ingest_phantom_candidates_total` and `up == 0` (the dashboard exists, §12).
 5. **Branch protection** on `main` (paid plan or public repo, §10).
 6. **Zero-downtime deploys:** start the new container, wait for health, then switch nginx.
 7. **Retention and backups:** partition `observations` by day and drop old partitions; nightly
@@ -481,3 +482,38 @@ In priority order: the first items close real failure modes, the rest are featur
    frequency instead of fixed buckets (§4.3); trim the stream by acked position (§1).
 10. **`multi_sensor` and `sensor_silence` rule types**, and webhook notifications with retries.
 11. **Scale alert-service** by partitioning the stream by signal key (§4.5).
+
+---
+
+## 12. Bonus: observability (Prometheus + Grafana)
+
+- **Prometheus** scrapes both services every 15 s over the internal compose network, not
+  through nginx. It has no published port. Retention is bounded twice: **7 days or 1 GB**,
+  whichever comes first, so it cannot fill the VM disk (§8.4).
+- **Grafana** is served by nginx at **`/grafana/`**, so 22 and 80 stay the only open ports.
+  **Login is required** (admin, password generated on the VM; anonymous access and sign-up are
+  off). Chosen over anonymous viewing because rules and alerts are operational data, even
+  though the API itself is still open (§10).
+- **Provisioned as code:** the data source and the dashboard
+  (`observability/grafana/dashboards/rf-alert-manager.json`) are loaded from git on every start.
+  Grafana has **no volume**: UI edits are not saved, so the dashboard in git is the only
+  version and a redeploy can never drift from it.
+- **Two metrics added to alert-service** for the dashboard: `alerts_opened_total{severity}`
+  and `open_alerts{state,severity}`. The gauge is recomputed from the database in the sweep
+  (every `SWEEP_INTERVAL_S`), so it is correct after a restart and after manual ack/resolve,
+  which a counter-derived value would not be. A label set that disappears is set to 0 instead of
+  keeping its last value. The domain only counts; Prometheus stays in the adapter (§2).
+- **Memory:** both containers are capped at 256 MB (`mem_limit`). The VM has 2 GB and no swap;
+  measured use is about 60 MB (Grafana) and 20 MB (Prometheus) at simulator load, so a leak hits
+  its own cap instead of the database or the services.
+- **Secrets on later deploys:** a new setting (here `GRAFANA_ADMIN_PASSWORD`) must reach the
+  VM's existing `.env`. `infra/env-sync.sh` runs on every deploy: it adds keys that are in
+  `.env.example` but missing from `.env`, generates a random value for each `change-me[-name]`
+  placeholder (the same placeholder gets the same value, so `POSTGRES_PASSWORD` and
+  `DATABASE_URL` agree), and never changes an existing value.
+- **Grafana does not get `env_file`:** only its own settings, so it never sees the database
+  password.
+- **Smoke test** also checks Grafana's health through nginx and that Prometheus has both scrape
+  targets up, so a broken observability config fails the deploy and rolls back (§9.4).
+- **Not done:** alert rules and Alertmanager (§10, §11). They need a notification channel,
+  which is the separate webhook bonus.
