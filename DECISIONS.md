@@ -1,7 +1,6 @@
 # Decisions and Trade-offs
 
-Each decision: what I chose, why, and what it costs. Items marked **[TODO]** are filled in
-during implementation.
+Each decision: what I chose, why, and what it costs.
 
 ---
 
@@ -412,7 +411,42 @@ SSH key is needed. It runs as a systemd service (starts on boot), registered by
 - **Runner token:** one-time, used once at registration.
 - gitleaks runs in pre-commit to catch secrets committed by mistake.
 
-## 10. Not production-ready [TODO]
+## 10. Not production-ready
+
+Known gaps, most of them deliberate for the 4-hour scope. Each links to where it is explained.
+
+**Security**
+- **No authentication or TLS.** Every endpoint, including rules CRUD and ack/resolve, is open
+  to anyone who can reach port 80, over plain HTTP. Acceptable only because the VM is on a
+  local, non-routable network.
+- **`/metrics` is public** through nginx (`/ingest/metrics`, `/alert/metrics`). In production
+  it would be reachable only from the Prometheus network.
+- **No rate limiting** in nginx. A single client can saturate ingest.
+
+**Availability and data**
+- **Single VM, single alert-service consumer** (§4.5). If the VM is down, nothing is ingested;
+  sensors must buffer and retry.
+- **Pending runs and the watermark are in memory** (§4.6). A restart delays an alert that is
+  about to open; a crash at the wrong moment can miss one.
+- **Phantom events** are possible when ingest crashes between publish and commit (§7.1, §7.2,
+  ADR 0001).
+- **No database backups.** Data survives restarts (named volume), not losing the VM disk.
+- **No data retention.** `observations` grows without bound; at simulator rates this is fine
+  for weeks, not for a real sensor network.
+- **Deploy restarts the services** (seconds of 502 from nginx while a container is replaced).
+  Sensors retry; zero-downtime deploys were a bonus item and not done.
+
+**Operations**
+- **Local VM:** its IP can change after a host reboot (§8.1), and the laptop must be on for the
+  pipeline to deploy.
+- **Rollback changes code, not data** (§9.4).
+- **No alerting on the system itself:** metrics are exposed but nothing scrapes or alerts on them.
+
+**Features**
+- Only the required `power_threshold` rule type. The optional `multi_sensor` rule was not built;
+  the evaluator registry makes it one new class (§2).
+
+**Process**
 
 - **Merge is not blocked by a red CI.** Branch protection and rulesets on a private repository
   need a paid GitHub plan (the API returns 403 on the free plan). Making the repo public would
@@ -426,6 +460,24 @@ SSH key is needed. It runs as a systemd service (starts on boot), registered by
     alert_service)`, `integration-tests (ingest_service)` and `integration-tests (alert_service)`,
     plus pull requests before merging.
 
-## 11. What I would improve with more time [TODO]
+## 11. What I would improve with more time
 
-- Add `schema_version` to the `rule_match` event so consumers can reject unknown shapes (§3).
+In priority order: the first items close real failure modes, the rest are features.
+
+1. **Transactional outbox** in ingest, removing phantom events (§7.2, ADR 0001).
+2. **Persist pending runs** (Redis with AOF or Postgres) and ack events only after the state they
+   changed is durable, closing the crash-before-commit gap (§4.6).
+3. **Auth and TLS:** API keys per sensor for ingest, a user login for rules and alert actions,
+   HTTPS in nginx; `/metrics` on an internal network only.
+4. **Observability:** Prometheus and Grafana with a dashboard provisioned as code, and alerts on
+   `late_observations_dropped_total`, `future_observations_dropped_total`, consumer lag and
+   `ingest_phantom_candidates_total`.
+5. **Branch protection** on `main` (paid plan or public repo, §10).
+6. **Zero-downtime deploys:** start the new container, wait for health, then switch nginx.
+7. **Retention and backups:** partition `observations` by day and drop old partitions; nightly
+   `pg_dump` off the VM.
+8. **`schema_version` on the `rule_match` event** so consumers can reject unknown shapes (§3).
+9. **Better "same signal":** a site/zone dimension and matching against the open alert's
+   frequency instead of fixed buckets (§4.3); trim the stream by acked position (§1).
+10. **`multi_sensor` and `sensor_silence` rule types**, and webhook notifications with retries.
+11. **Scale alert-service** by partitioning the stream by signal key (§4.5).
