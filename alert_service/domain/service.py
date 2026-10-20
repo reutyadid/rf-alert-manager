@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from collections import Counter
 from datetime import timedelta
 
 from alert_service.domain.errors import AlertNotFound, InvalidTransition
@@ -149,6 +150,10 @@ class AlertService:
 
     async def list_alerts(self, flt: AlertFilter) -> list[Alert]:
         return await self._repo.query(flt)
+
+    async def active_alert_counts(self) -> dict[tuple[AlertState, str], int]:
+        """Number of OPEN / ACKNOWLEDGED alerts per (state, severity), for metrics."""
+        return dict(Counter((a.state, a.severity) for a in await self._repo.list_active()))
 
     async def get_alert(self, alert_id: str) -> tuple[Alert, list[Contribution]]:
         alert = await self._get(alert_id)

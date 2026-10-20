@@ -140,6 +140,7 @@ class RedisMatchConsumer:
                 extra={"sensor_id": match.sensor_id, "timestamp": match.timestamp.isoformat()},
             )
         if outcome is MatchOutcome.OPENED:
+            metrics.ALERTS_OPENED.labels(severity=match.rule.severity).inc()
             log.info(
                 "alert opened",
                 extra={"rule_id": match.rule_id, "frequency_mhz": match.frequency_mhz},

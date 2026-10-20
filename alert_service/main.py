@@ -80,6 +80,7 @@ async def sweep_loop(service: AlertService, interval_s: float) -> None:
                     extra={"alert_id": alert.alert_id, "last_seen": alert.last_seen.isoformat()},
                 )
             metrics.PENDING_RUNS.set(service.pending_run_count)
+            metrics.set_open_alerts(await service.active_alert_counts())
         except Exception:
             log.exception("sweep failed")
 
