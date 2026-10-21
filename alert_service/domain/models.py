@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
 
 class AlertState(StrEnum):
@@ -105,6 +106,40 @@ class AlertEvent:
     type: AlertEventType
     occurred_at: datetime  # wall clock, same timeline as resolved_at / acknowledged_at
     resolution: str | None = None  # "auto" / "manual" for RESOLVED
+
+
+@dataclass(frozen=True)
+class OutboxRow:
+    """A pending webhook notification. `alert` is the alert JSON at the time of the change."""
+
+    id: str
+    seq: int
+    alert_id: str
+    type: AlertEventType
+    occurred_at: datetime
+    resolution: str | None
+    alert: dict[str, Any]
+    attempts: int
+
+
+@dataclass(frozen=True)
+class Delivered:
+    status: int
+
+
+@dataclass(frozen=True)
+class Retryable:
+    reason: str
+    status: int | None = None
+
+
+@dataclass(frozen=True)
+class Permanent:
+    reason: str
+    status: int | None = None
+
+
+SendOutcome = Delivered | Retryable | Permanent
 
 
 @dataclass(frozen=True)

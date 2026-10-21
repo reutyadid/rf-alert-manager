@@ -25,7 +25,7 @@ async def repo():
     from alert_service.adapters.postgres_repo import PostgresAlertRepository, apply_schema
 
     pool = await asyncpg.create_pool(DATABASE_URL)
-    await pool.execute("DROP TABLE IF EXISTS alert_observations, alerts")
+    await pool.execute("DROP TABLE IF EXISTS alert_notifications, alert_observations, alerts")
     await apply_schema(pool)
     await apply_schema(pool)  # idempotent
     yield PostgresAlertRepository(pool)

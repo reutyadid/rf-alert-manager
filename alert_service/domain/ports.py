@@ -1,7 +1,15 @@
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
-from alert_service.domain.models import Alert, AlertEvent, AlertFilter, AlertState, Contribution
+from alert_service.domain.models import (
+    Alert,
+    AlertEvent,
+    AlertFilter,
+    AlertState,
+    Contribution,
+    OutboxRow,
+    SendOutcome,
+)
 
 
 class Clock(Protocol):
@@ -42,3 +50,31 @@ class AlertRepository(Protocol):
     async def query(self, flt: AlertFilter) -> list[Alert]: ...
 
     async def list_contributions(self, alert_id: str) -> list[Contribution]: ...
+
+
+class OutboxRepo(Protocol):
+    """Webhook notifications written by AlertRepository together with the alert change."""
+
+    async def fetch_due(self, now: datetime, limit: int) -> list[OutboxRow]:
+        """Pending rows ordered by seq. A row is due only if next_attempt_at <= now AND no
+        lower-seq row for the same alert_id is still pending (per-alert ordering: resolved is
+        never sent before opened). A dead row no longer blocks the rows after it."""
+        ...
+
+    async def mark_sent(self, row_id: str, attempts: int, at: datetime, status: int) -> None: ...
+
+    async def schedule_retry(
+        self, row_id: str, attempts: int, next_attempt_at: datetime, status: int | None, error: str
+    ) -> None: ...
+
+    async def mark_dead(
+        self, row_id: str, attempts: int, status: int | None, error: str
+    ) -> None: ...
+
+    async def oldest_pending_occurred_at(self) -> datetime | None: ...
+
+
+class WebhookSender(Protocol):
+    async def send(self, notification: dict[str, Any]) -> SendOutcome:
+        """POST one notification. Never raises for HTTP or network errors."""
+        ...

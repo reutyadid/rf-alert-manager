@@ -1,9 +1,20 @@
+import json
+import uuid
 from datetime import datetime
 from pathlib import Path
 
 import asyncpg
 
-from alert_service.domain.models import Alert, AlertEvent, AlertFilter, AlertState, Contribution
+from alert_service.api.schemas import AlertOut
+from alert_service.domain.models import (
+    Alert,
+    AlertEvent,
+    AlertEventType,
+    AlertFilter,
+    AlertState,
+    Contribution,
+    OutboxRow,
+)
 
 SCHEMA_FILE = Path(__file__).resolve().parent.parent / "db" / "schema.sql"
 
@@ -44,6 +55,27 @@ _INSERT_CONTRIBUTION = """
 """
 
 
+_INSERT_NOTIFICATION = """
+    INSERT INTO alert_notifications
+        (id, alert_id, type, occurred_at, resolution, payload, next_attempt_at)
+    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $4)
+"""
+
+
+async def _insert_notification(conn: asyncpg.Connection, alert: Alert, event: AlertEvent) -> None:
+    # The same JSON the API returns, so a receiver sees the alert exactly as GET shows it.
+    payload = AlertOut.from_domain(alert).model_dump(mode="json")
+    await conn.execute(
+        _INSERT_NOTIFICATION,
+        f"ntf-{uuid.uuid4().hex}",
+        alert.alert_id,
+        event.type.value,
+        event.occurred_at,
+        event.resolution,
+        json.dumps(payload),
+    )
+
+
 async def apply_schema(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         # Serialise concurrent startups (e.g. during a rolling deploy).
@@ -81,6 +113,8 @@ class PostgresAlertRepository:
             await conn.executemany(
                 _INSERT_CONTRIBUTION, [_contribution_args(alert.alert_id, c) for c in contributions]
             )
+            if event is not None:
+                await _insert_notification(conn, alert, event)
 
     async def get(self, alert_id: str) -> Alert | None:
         row = await self._pool.fetchrow(
@@ -141,15 +175,21 @@ class PostgresAlertRepository:
             AlertState.ACKNOWLEDGED: "acknowledged_at",
             AlertState.RESOLVED: "resolved_at",
         }[to_state]
-        row = await self._pool.fetchrow(
-            f"UPDATE alerts SET state = $2, {column} = $3 "
-            f"WHERE alert_id = $1 AND state = ANY($4::text[]) RETURNING {_ALERT_COLUMNS}",
-            alert_id,
-            to_state.value,
-            at,
-            [s.value for s in from_states],
-        )
-        return _to_alert(row) if row else None
+        async with self._pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                f"UPDATE alerts SET state = $2, {column} = $3 "
+                f"WHERE alert_id = $1 AND state = ANY($4::text[]) RETURNING {_ALERT_COLUMNS}",
+                alert_id,
+                to_state.value,
+                at,
+                [s.value for s in from_states],
+            )
+            if row is None:  # lost the race: no change, so nothing to notify
+                return None
+            alert = _to_alert(row)
+            if event is not None:
+                await _insert_notification(conn, alert, event)
+            return alert
 
     async def query(self, flt: AlertFilter) -> list[Alert]:
         conditions: list[str] = []
@@ -194,3 +234,73 @@ class PostgresAlertRepository:
             )
             for r in rows
         ]
+
+
+def _to_outbox_row(row: asyncpg.Record) -> OutboxRow:
+    return OutboxRow(
+        id=row["id"],
+        seq=row["seq"],
+        alert_id=row["alert_id"],
+        type=AlertEventType(row["type"]),
+        occurred_at=row["occurred_at"],
+        resolution=row["resolution"],
+        alert=json.loads(row["payload"]),
+        attempts=row["attempts"],
+    )
+
+
+class PostgresOutboxRepo:
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+
+    async def fetch_due(self, now: datetime, limit: int) -> list[OutboxRow]:
+        rows = await self._pool.fetch(
+            "SELECT id, seq, alert_id, type, occurred_at, resolution, payload, attempts "
+            "FROM alert_notifications n "
+            "WHERE n.status = 'pending' AND n.next_attempt_at <= $1 "
+            # Per-alert ordering (OutboxRepo contract): wait for earlier pending rows.
+            "AND NOT EXISTS (SELECT 1 FROM alert_notifications e "
+            "WHERE e.alert_id = n.alert_id AND e.status = 'pending' AND e.seq < n.seq) "
+            "ORDER BY n.seq LIMIT $2",
+            now,
+            limit,
+        )
+        return [_to_outbox_row(r) for r in rows]
+
+    async def mark_sent(self, row_id: str, attempts: int, at: datetime, status: int) -> None:
+        await self._pool.execute(
+            "UPDATE alert_notifications SET status = 'sent', attempts = $2, sent_at = $3, "
+            "last_status_code = $4, last_error = NULL WHERE id = $1",
+            row_id,
+            attempts,
+            at,
+            status,
+        )
+
+    async def schedule_retry(
+        self, row_id: str, attempts: int, next_attempt_at: datetime, status: int | None, error: str
+    ) -> None:
+        await self._pool.execute(
+            "UPDATE alert_notifications SET attempts = $2, next_attempt_at = $3, "
+            "last_status_code = $4, last_error = $5 WHERE id = $1",
+            row_id,
+            attempts,
+            next_attempt_at,
+            status,
+            error,
+        )
+
+    async def mark_dead(self, row_id: str, attempts: int, status: int | None, error: str) -> None:
+        await self._pool.execute(
+            "UPDATE alert_notifications SET status = 'dead', attempts = $2, "
+            "last_status_code = $3, last_error = $4 WHERE id = $1",
+            row_id,
+            attempts,
+            status,
+            error,
+        )
+
+    async def oldest_pending_occurred_at(self) -> datetime | None:
+        return await self._pool.fetchval(
+            "SELECT min(occurred_at) FROM alert_notifications WHERE status = 'pending'"
+        )

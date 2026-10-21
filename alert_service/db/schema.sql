@@ -38,3 +38,27 @@ CREATE TABLE IF NOT EXISTS alert_observations (
     power_dbm       DOUBLE PRECISION NOT NULL,
     PRIMARY KEY (alert_id, observation_id)
 );
+
+-- Webhook outbox: one row per alert.opened / alert.resolved, written in the same transaction
+-- as the alert change and sent by the dispatcher (at-least-once; receivers dedupe on id).
+CREATE TABLE IF NOT EXISTS alert_notifications (
+    id               TEXT PRIMARY KEY,
+    seq              BIGSERIAL NOT NULL UNIQUE,
+    alert_id         TEXT NOT NULL REFERENCES alerts (alert_id) ON DELETE CASCADE,
+    type             TEXT NOT NULL,
+    occurred_at      TIMESTAMPTZ NOT NULL,
+    resolution       TEXT,
+    payload          JSONB NOT NULL,  -- the alert as the API shows it, at the time of change
+    status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'dead')),
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at  TIMESTAMPTZ NOT NULL,
+    last_status_code INTEGER,
+    last_error       TEXT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sent_at          TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS alert_notifications_due_idx
+    ON alert_notifications (next_attempt_at) WHERE status = 'pending';
+-- Per-alert ordering: "is there an earlier pending row for this alert?"
+CREATE INDEX IF NOT EXISTS alert_notifications_pending_alert_idx
+    ON alert_notifications (alert_id, seq) WHERE status = 'pending';
