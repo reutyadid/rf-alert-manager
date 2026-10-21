@@ -58,6 +58,10 @@ services:
     build: ./alert_service
     restart: unless-stopped
     env_file: .env
+    # Same values as .env, but the shell can override them (scripts/demo-webhooks.sh).
+    environment:
+      WEBHOOK_URL: ${WEBHOOK_URL:-}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -132,6 +136,17 @@ services:
       timeout: 3s
       retries: 5
       start_period: 30s
+    logging: *logging
+
+  # Demo only: started with `--profile demo` (scripts/demo-webhooks.sh). Not deployed, not in
+  # the smoke test. No env_file, so it never sees the database password.
+  webhook-receiver:
+    build: ./webhook_receiver
+    profiles: [demo]
+    environment:
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      FAIL_FIRST_N: ${FAIL_FIRST_N:-0}
+    mem_limit: 64m
     logging: *logging
 
 volumes:

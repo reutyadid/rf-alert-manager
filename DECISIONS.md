@@ -615,4 +615,13 @@ Design notes and the options considered: `notes/webhooks-design.md`.
   low. One Grafana row.
 - **Schema:** the table is additive (`CREATE TABLE IF NOT EXISTS` in `schema.sql`), so rolling
   back to the previous image still works. The old code ignores it.
+- **Demo:** `scripts/demo-webhooks.sh` (local stack, run from the repo root).
+  - It starts compose profile `demo`, which adds a stdlib-only `webhook-receiver`. The receiver
+    checks the signature and the ±5 min window, and `FAIL_FIRST_N=2` makes it fail the first
+    two requests.
+  - The script then opens an alert, resolves it through the API, and checks that the receiver
+    got `opened` (after two 503s) and then `resolved/manual`.
+  - The receiver is not deployed and not in the smoke test. It gets no `env_file`, so it never
+    sees the database password.
+  - No public webhook services: alert data stays on our network.
 - Gaps: §10 "Webhook notifications".
