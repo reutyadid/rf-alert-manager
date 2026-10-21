@@ -3,7 +3,16 @@
 import dataclasses
 from datetime import UTC, datetime, timedelta
 
-from alert_service.domain.models import Alert, AlertEvent, AlertFilter, AlertState, Contribution
+from alert_service.domain.models import (
+    Alert,
+    AlertEvent,
+    AlertFilter,
+    AlertState,
+    Contribution,
+    Delivered,
+    OutboxRow,
+    SendOutcome,
+)
 
 
 class FakeClock:
@@ -97,6 +106,88 @@ class InMemoryAlertRepository:
 
     async def list_contributions(self, alert_id: str) -> list[Contribution]:
         return list(self.contributions.get(alert_id, []))
+
+
+class InMemoryOutboxRepo:
+    """Same contract as PostgresOutboxRepo, including per-alert ordering."""
+
+    def __init__(self) -> None:
+        self.rows: list[dict] = []  # OutboxRow fields + status, next_attempt_at, last_*
+
+    def add(self, alert_id: str, type_, occurred_at: datetime, resolution=None) -> str:
+        row_id = f"ntf-{len(self.rows) + 1}"
+        self.rows.append(
+            {
+                "id": row_id,
+                "seq": len(self.rows) + 1,
+                "alert_id": alert_id,
+                "type": type_,
+                "occurred_at": occurred_at,
+                "resolution": resolution,
+                "alert": {"alert_id": alert_id},
+                "attempts": 0,
+                "status": "pending",
+                "next_attempt_at": occurred_at,
+                "last_status_code": None,
+                "last_error": None,
+                "sent_at": None,
+            }
+        )
+        return row_id
+
+    def row(self, row_id: str) -> dict:
+        return next(r for r in self.rows if r["id"] == row_id)
+
+    async def fetch_due(self, now: datetime, limit: int) -> list[OutboxRow]:
+        pending = [r for r in self.rows if r["status"] == "pending"]
+        due = [
+            r
+            for r in pending
+            if r["next_attempt_at"] <= now
+            and not any(e["alert_id"] == r["alert_id"] and e["seq"] < r["seq"] for e in pending)
+        ]
+        fields = {f.name for f in dataclasses.fields(OutboxRow)}
+        due.sort(key=lambda r: r["seq"])
+        return [OutboxRow(**{k: r[k] for k in fields}) for r in due[:limit]]
+
+    async def mark_sent(self, row_id: str, attempts: int, at: datetime, status: int) -> None:
+        self.row(row_id).update(
+            status="sent", attempts=attempts, sent_at=at, last_status_code=status, last_error=None
+        )
+
+    async def schedule_retry(
+        self, row_id: str, attempts: int, next_attempt_at: datetime, status: int | None, error: str
+    ) -> None:
+        self.row(row_id).update(
+            attempts=attempts,
+            next_attempt_at=next_attempt_at,
+            last_status_code=status,
+            last_error=error,
+        )
+
+    async def mark_dead(self, row_id: str, attempts: int, status: int | None, error: str) -> None:
+        self.row(row_id).update(
+            status="dead", attempts=attempts, last_status_code=status, last_error=error
+        )
+
+    async def oldest_pending_occurred_at(self) -> datetime | None:
+        return min((r["occurred_at"] for r in self.rows if r["status"] == "pending"), default=None)
+
+
+class FakeSender:
+    """Returns the queued outcomes in order (Delivered(200) once empty). An Exception in the
+    queue is raised instead of returned."""
+
+    def __init__(self, *outcomes) -> None:
+        self.outcomes = list(outcomes)
+        self.sent: list[dict] = []
+
+    async def send(self, notification: dict) -> SendOutcome:
+        self.sent.append(notification)
+        outcome = self.outcomes.pop(0) if self.outcomes else Delivered(200)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 T0 = datetime(2026, 10, 6, 10, 0, 0, tzinfo=UTC)
