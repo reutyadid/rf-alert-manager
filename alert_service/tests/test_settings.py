@@ -39,3 +39,26 @@ async def test_health_check_fails_when_a_background_task_stopped():
     await asyncio.gather(task, return_exceptions=True)
     with pytest.raises(RuntimeError, match="consumer"):
         await tasks_alive([task])()
+
+
+def test_webhook_is_disabled_by_default():
+    assert Settings(**REQUIRED).webhook_url == ""
+
+
+def test_webhook_with_a_real_secret_is_valid():
+    settings = Settings(**REQUIRED, webhook_url="https://hooks.example/rf", webhook_secret="a" * 32)
+    assert settings.webhook_url == "https://hooks.example/rf"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"webhook_url": "https://hooks.example/rf"},  # no secret
+        {"webhook_url": "https://hooks.example/rf", "webhook_secret": "change-me-webhook"},
+        {"webhook_url": "ftp://hooks.example/rf", "webhook_secret": "a" * 32},
+        {"webhook_url": "hooks.example/rf", "webhook_secret": "a" * 32},
+    ],
+)
+def test_invalid_webhook_settings_fail_at_startup(override):
+    with pytest.raises(ValidationError):
+        Settings(**REQUIRED, **override)

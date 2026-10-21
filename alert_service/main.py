@@ -9,15 +9,21 @@ import asyncpg
 import redis.asyncio as redis
 import uvicorn
 from fastapi import FastAPI
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from alert_service.adapters import metrics
 from alert_service.adapters.clock import SystemClock
 from alert_service.adapters.json_logging import configure_logging
-from alert_service.adapters.postgres_repo import PostgresAlertRepository, apply_schema
+from alert_service.adapters.postgres_repo import (
+    PostgresAlertRepository,
+    PostgresOutboxRepo,
+    apply_schema,
+)
 from alert_service.adapters.redis_consumer import RedisMatchConsumer
+from alert_service.adapters.webhook_sender import HttpWebhookSender, make_client
 from alert_service.api.app import create_app
+from alert_service.domain.notifications import Dispatcher
 from alert_service.domain.service import AlertService
 from alert_service.domain.watermark import Watermark
 
@@ -38,6 +44,21 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     consumer_group: str = "alert-service"
     port: int = 8000
+    # Empty URL = webhook notifications off (no outbox rows, no dispatcher).
+    webhook_url: str = ""
+    webhook_secret: str = ""
+    webhook_poll_interval_s: float = Field(default=1, gt=0)
+
+    @model_validator(mode="after")
+    def _check_webhook(self) -> "Settings":
+        if not self.webhook_url:
+            return self
+        scheme, sep, host = self.webhook_url.partition("://")
+        if scheme not in ("http", "https") or not sep or not host:
+            raise ValueError("WEBHOOK_URL must be an http:// or https:// URL")
+        if not self.webhook_secret or self.webhook_secret.startswith("change-me"):
+            raise ValueError("WEBHOOK_SECRET must be set to a real secret when WEBHOOK_URL is set")
+        return self
 
 
 async def with_retries[T](
@@ -85,6 +106,34 @@ async def sweep_loop(service: AlertService, interval_s: float) -> None:
             log.exception("sweep failed")
 
 
+async def run_dispatch(dispatcher: Dispatcher) -> None:
+    result = await dispatcher.dispatch_due()
+    for row in result.delivered:
+        metrics.WEBHOOK_DELIVERED.labels(type=row.type.value).inc()
+    for row, error in result.dead:
+        metrics.WEBHOOK_DEAD.labels(type=row.type.value).inc()
+        log.warning(
+            "webhook notification dead",
+            extra={
+                "notification_id": row.id,
+                "alert_id": row.alert_id,
+                "type": row.type.value,
+                "attempts": row.attempts + 1,
+                "error": error,
+            },
+        )
+    metrics.WEBHOOK_OLDEST_PENDING_AGE.set(await dispatcher.oldest_pending_age_s())
+
+
+async def dispatch_loop(dispatcher: Dispatcher, interval_s: float) -> None:
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            await run_dispatch(dispatcher)
+        except Exception:
+            log.exception("webhook dispatch failed")
+
+
 def build_app(settings: Settings) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -102,6 +151,7 @@ def build_app(settings: Settings) -> FastAPI:
             watermark,
             settings.freq_tolerance_mhz,
             settings.max_clock_skew_s,
+            notify=bool(settings.webhook_url),
         )
         consumer = RedisMatchConsumer(
             client,
@@ -113,6 +163,19 @@ def build_app(settings: Settings) -> FastAPI:
             asyncio.create_task(consumer.run(), name="consumer"),
             asyncio.create_task(sweep_loop(service, settings.sweep_interval_s), name="sweep"),
         ]
+        http_client = None
+        if settings.webhook_url:
+            http_client = make_client()
+            sender = HttpWebhookSender(
+                http_client, settings.webhook_url, settings.webhook_secret, clock
+            )
+            dispatcher = Dispatcher(PostgresOutboxRepo(pool), sender, clock)
+            # A dead dispatcher makes /health 503; an unreachable receiver does not.
+            tasks.append(
+                asyncio.create_task(
+                    dispatch_loop(dispatcher, settings.webhook_poll_interval_s), name="dispatcher"
+                )
+            )
         app.state.service = service
         app.state.health_checks = {
             "database": lambda: pool.fetchval("SELECT 1"),
@@ -126,6 +189,8 @@ def build_app(settings: Settings) -> FastAPI:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if http_client is not None:
+                await http_client.aclose()
             await client.aclose()
             await pool.close()
 

@@ -47,3 +47,18 @@ def set_open_alerts(counts: dict[tuple[AlertState, str], int]) -> None:
     for labels, n in current.items():
         OPEN_ALERTS.labels(*labels).set(n)
     _open_alert_labels.update(current)
+
+
+WEBHOOK_DELIVERED = Counter(
+    "webhook_notifications_delivered_total", "Webhook notifications delivered, by type", ["type"]
+)
+WEBHOOK_DEAD = Counter(
+    "webhook_notifications_dead_total",
+    "Webhook notifications given up on (permanent error or max attempts), by type",
+    ["type"],
+)
+WEBHOOK_OLDEST_PENDING_AGE = Gauge(
+    "webhook_outbox_oldest_pending_age_seconds",
+    "Age of the oldest undelivered webhook notification (0 when none): how long the receiver "
+    "has been unreachable",
+)

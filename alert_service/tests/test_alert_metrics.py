@@ -7,7 +7,7 @@ from prometheus_client import REGISTRY
 
 from alert_service.adapters import metrics
 from alert_service.adapters.redis_consumer import RedisMatchConsumer
-from alert_service.domain.models import AlertState, MatchOutcome, RuleParams
+from alert_service.domain.models import AlertState, Delivered, MatchOutcome, Retryable, RuleParams
 from alert_service.tests.test_alert_service import PARAMS, alerts, build, feed
 from alert_service.tests.test_consumer_errors import FakeRedis
 from alert_service.tests.test_events import event
@@ -75,3 +75,32 @@ async def test_consumer_counts_opened_alerts_by_severity():
     await RedisMatchConsumer(fake, OpeningService()).poll_once("0")
 
     assert sample("alerts_opened_total", severity="HIGH") == before + 1
+
+
+# --- webhook dispatcher ----------------------------------------------------------------
+
+
+async def test_dispatch_pass_updates_webhook_metrics():
+    from alert_service.domain.models import AlertEventType, Permanent
+    from alert_service.domain.notifications import Dispatcher
+    from alert_service.main import run_dispatch
+    from alert_service.tests.fakes import T0, FakeClock, FakeSender, InMemoryOutboxRepo
+
+    outbox, clock = InMemoryOutboxRepo(), FakeClock(T0)
+    dispatcher = Dispatcher(outbox, FakeSender(Delivered(200), Permanent("HTTP 404", 404)), clock)
+    outbox.add("alrt-1", AlertEventType.OPENED, T0)
+    outbox.add("alrt-2", AlertEventType.RESOLVED, T0, "auto")
+    delivered = sample("webhook_notifications_delivered_total", type="alert.opened")
+    dead = sample("webhook_notifications_dead_total", type="alert.resolved")
+
+    await run_dispatch(dispatcher)
+    assert sample("webhook_notifications_delivered_total", type="alert.opened") == delivered + 1
+    assert sample("webhook_notifications_dead_total", type="alert.resolved") == dead + 1
+    assert sample("webhook_outbox_oldest_pending_age_seconds") == 0
+
+    # Receiver down: the row created at T0 stays pending, and its age is what the panel shows.
+    failing = Dispatcher(outbox, FakeSender(Retryable("HTTP 503", 503)), clock)
+    outbox.add("alrt-3", AlertEventType.OPENED, T0)
+    clock.advance(42)
+    await run_dispatch(failing)
+    assert sample("webhook_outbox_oldest_pending_age_seconds") == 42
