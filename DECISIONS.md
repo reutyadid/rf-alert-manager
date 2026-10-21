@@ -459,6 +459,25 @@ Known gaps, most of them deliberate for the 4-hour scope. Each links to where it
 - Only the required `power_threshold` rule type. The optional `multi_sensor` rule was not built;
   the evaluator registry makes it one new class (§2).
 
+**Webhook notifications** (§13)
+- **One global endpoint, one secret:** no per-rule or per-severity routing, no secret rotation.
+- **No SSRF hardening** beyond the http/https check. The URL is operator-set, not user input.
+  Production: https only, block private ranges after DNS resolution, egress proxy.
+- **No replay API** for dead notifications. Replay is a manual
+  `UPDATE alert_notifications SET status = 'pending' ...`.
+- **No outbox cleanup:** `sent` rows are kept (low volume). Production: delete `sent` rows older
+  than N days on a schedule.
+- **No jitter in the backoff:** one dispatcher and one receiver, so there is no thundering herd.
+  The schedule stays deterministic and easy to test.
+- **`Retry-After` is not parsed:** 429 is retried on the normal backoff schedule.
+- **No `WEBHOOK_MIN_SEVERITY` filter:** not asked for, and it would change which events the
+  domain emits.
+- **Sequential sending** is a throughput ceiling (one request at a time).
+- **Single instance only:** a second alert-service would need `FOR UPDATE SKIP LOCKED` in the
+  fetch (§4.5).
+- **Shutdown during an in-flight send** can deliver the same notification twice. Receivers
+  dedupe on `id`.
+
 **Process**
 
 - **Merge is not blocked by a red CI.** Branch protection and rulesets on a private repository
@@ -492,7 +511,7 @@ In priority order: the first items close real failure modes, the rest are featur
 8. **`schema_version` on the `rule_match` event** so consumers can reject unknown shapes (§3).
 9. **Better "same signal":** a site/zone dimension and matching against the open alert's
    frequency instead of fixed buckets (§4.3); trim the stream by acked position (§1).
-10. **`multi_sensor` and `sensor_silence` rule types**, and webhook notifications with retries.
+10. **`multi_sensor` and `sensor_silence` rule types.**
 11. **Scale alert-service** by partitioning the stream by signal key (§4.5).
 
 ---
@@ -529,3 +548,71 @@ In priority order: the first items close real failure modes, the rest are featur
   targets up, so a broken observability config fails the deploy and rolls back (§9.4).
 - **Not done:** alert rules and Alertmanager (§10, §11). They need a notification channel,
   which is the separate webhook bonus.
+
+---
+
+## 13. Bonus: webhook notifications
+
+Design notes and the options considered: `notes/webhooks-design.md`.
+
+- **Events:**
+  - `alert.opened` when an alert opens.
+  - `alert.resolved` with `resolution` `auto` (sweep) or `manual` (API).
+  - Acknowledge sends nothing. The `alert.<event>` names leave room for `alert.acknowledged`.
+- **Transactional outbox, not fire-and-forget.** The domain passes an `AlertEvent` to the
+  repository with the change. The adapter writes a row to `alert_notifications` in the same
+  transaction as the alert insert or state update.
+  - Why: an in-memory send would be lost if the service crashed after the commit. The replayed
+    Redis event then hits dedup, and the alert is never "opened" again.
+  - `transition()` now runs in an explicit transaction. A transition that loses the race
+    (`WHERE state = ANY(...)` matches nothing) writes no row.
+  - The domain decides *that* an event happens (testable with fakes). The adapter decides *how*
+    it is stored. With `WEBHOOK_URL` empty, no events are emitted, so no rows pile up.
+- **Payload:** `{version, id, type, sequence, occurred_at, resolution, alert}`.
+  - `alert` is the same JSON as `GET /api/v1/alerts`, snapshotted at the time of the change, so
+    a late `alert.opened` never shows `RESOLVED`.
+  - `occurred_at` is the server's wall clock for all three events. That is the same timeline as
+    `resolved_at`. Event time is in `first_seen` / `last_seen`.
+- **At-least-once:** receivers dedupe on `id` (also in the `X-Webhook-Id` header).
+- **Per-alert ordering is guaranteed.** A row is due only if no lower-`seq` row for the same alert
+  is still `pending` (a `NOT EXISTS` in the fetch, covered by a partial index on
+  `(alert_id, seq) WHERE status = 'pending'`). So `resolved` is never delivered before `opened`.
+  - If the earlier row goes `dead`, the next one is released and sent normally. A receiver may
+    then see `resolved` with no `opened`.
+  - Different alerts never block each other.
+- **Dispatcher:** an asyncio task next to the consumer and sweep, polling every
+  `WEBHOOK_POLL_INTERVAL_S` (1 s). It sends due rows one at a time in `seq` order.
+  - Consumer, sweep and API only write rows and never wait on HTTP.
+  - A sender exception counts as a retryable failure of that row and never stops the loop.
+- **Retries:**
+  - Deterministic backoff 2, 4, 8, 16, 32, 60, 120, 300, 300 s, so 10 attempts cover about
+    14 min of receiver downtime.
+  - 2xx is delivered. 5xx, 408, 429, timeouts and connection errors are retried. 3xx (redirects
+    are not followed) and other 4xx are permanent.
+  - Giving up sets `status = 'dead'` with the last status and error, adds to the counter, and
+    logs one WARNING. Dead rows are the dead-letter queue.
+- **Health:** a stopped dispatcher task makes `/health` 503, like the consumer and sweep. An
+  unreachable receiver does **not**. `/health` drives the deploy smoke test and rollback (§9.4),
+  and an external system must not roll back our deploy.
+- **Security:**
+  - `X-Webhook-Signature: sha256=HMAC-SHA256(secret, "<timestamp>.<raw body>")` plus
+    `X-Webhook-Timestamp` (GitHub/Stripe pattern). The body is serialised once and exactly those
+    bytes are signed and sent.
+  - Receivers should reject timestamps more than 5 min off and compare in constant time.
+  - Timeouts are connect 3 s, total 10 s. The response body is ignored.
+- **Config:** `WEBHOOK_URL` (empty = off) and `WEBHOOK_SECRET`.
+  - Startup fails if the URL is not http(s), or the secret is empty or still a placeholder.
+  - The `.env.example` placeholder is `change-me-webhook`, not `change-me`: `env-sync.sh` gives
+    identical placeholders the same random value (§12), and plain `change-me` would make the
+    webhook secret equal to the database password.
+- **httpx** is now a runtime dependency (it was already a test dependency), behind the
+  `WebhookSender` port. Why: native async, separate connect/total timeouts, no redirects, and
+  `MockTransport` for tests. `urllib` in a thread has no real total deadline and cannot be
+  cancelled.
+- **Metrics:** `webhook_notifications_delivered_total{type}`,
+  `webhook_notifications_dead_total{type}` and `webhook_outbox_oldest_pending_age_seconds` ("how
+  long has the receiver been unreachable"). They have no `alert_id` label, to keep cardinality
+  low. One Grafana row.
+- **Schema:** the table is additive (`CREATE TABLE IF NOT EXISTS` in `schema.sql`), so rolling
+  back to the previous image still works. The old code ignores it.
+- Gaps: §10 "Webhook notifications".
