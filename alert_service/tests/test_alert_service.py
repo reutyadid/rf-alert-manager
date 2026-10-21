@@ -6,6 +6,8 @@ import pytest
 from alert_service.domain.errors import AlertNotFound, InvalidTransition
 from alert_service.domain.models import (
     Alert,
+    AlertEvent,
+    AlertEventType,
     AlertFilter,
     AlertState,
     MatchOutcome,
@@ -48,14 +50,23 @@ def match(
     )
 
 
-def build(repo: InMemoryAlertRepository | None = None, max_clock_skew_s: float = 3600):
+def build(
+    repo: InMemoryAlertRepository | None = None,
+    max_clock_skew_s: float = 3600,
+    notify: bool = False,
+):
     # The wall clock stays at T0 in most tests while event time moves on, so the default
     # skew is large; the clock-skew tests pass a small one.
     clock = FakeClock(T0)
     repo = repo or InMemoryAlertRepository()
     watermark = Watermark(clock, allowed_lateness_s=30, idle_timeout_s=30)
     service = AlertService(
-        repo, clock, watermark, freq_tolerance_mhz=0.1, max_clock_skew_s=max_clock_skew_s
+        repo,
+        clock,
+        watermark,
+        freq_tolerance_mhz=0.1,
+        max_clock_skew_s=max_clock_skew_s,
+        notify=notify,
     )
     return service, repo, clock
 
@@ -363,3 +374,57 @@ async def test_future_event_cannot_resolve_open_alerts():
     assert await service.sweep() == []
     [alert] = await alerts(service)
     assert alert.state is AlertState.OPEN
+
+
+# --- notification events -------------------------------------------------------------
+
+
+async def test_open_emits_opened_event():
+    service, repo, clock = build(notify=True)
+    await feed(service, range(0, 11))
+    [alert] = await alerts(service)
+    assert repo.events == [(alert.alert_id, AlertEvent(AlertEventType.OPENED, clock.now(), None))]
+
+
+async def test_auto_resolve_emits_resolved_auto():
+    service, repo, clock = build(notify=True)
+    await feed(service, range(0, 11))
+    await service.handle_match(match(101, freq=100.0))  # watermark 71: 61 s > 60 s
+    [resolved] = await service.sweep()
+    assert repo.events[-1] == (
+        resolved.alert_id,
+        AlertEvent(AlertEventType.RESOLVED, clock.now(), "auto"),
+    )
+
+
+async def test_manual_resolve_emits_resolved_manual_and_ack_emits_nothing():
+    service, repo, clock = build(notify=True)
+    await feed(service, range(0, 11))
+    [alert] = await alerts(service)
+    await service.acknowledge(alert.alert_id)
+    assert len(repo.events) == 1  # only opened
+    clock.advance(5)
+    await service.resolve(alert.alert_id)
+    assert repo.events[-1] == (
+        alert.alert_id,
+        AlertEvent(AlertEventType.RESOLVED, clock.now(), "manual"),
+    )
+    assert len(repo.events) == 2
+
+
+async def test_no_events_when_notifications_are_disabled():
+    service, repo, _ = build(notify=False)
+    await feed(service, range(0, 11))
+    [alert] = await alerts(service)
+    await service.resolve(alert.alert_id)
+    assert repo.events == []
+
+
+async def test_lost_transition_race_emits_nothing():
+    service, repo, _ = build(notify=True)
+    await feed(service, range(0, 11))
+    [alert] = await alerts(service)
+    repo.alerts[alert.alert_id].state = AlertState.RESOLVED  # changed behind our back
+    with pytest.raises(InvalidTransition):
+        await service.resolve(alert.alert_id)
+    assert [e.type for _, e in repo.events] == [AlertEventType.OPENED]

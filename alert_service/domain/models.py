@@ -92,6 +92,21 @@ class Alert:
             self.sensor_ids = sorted([*self.sensor_ids, c.sensor_id])
 
 
+class AlertEventType(StrEnum):
+    OPENED = "alert.opened"
+    RESOLVED = "alert.resolved"
+
+
+@dataclass(frozen=True)
+class AlertEvent:
+    """A change that must be notified. The domain decides that it happens; the adapter
+    stores it in the same transaction as the alert change (outbox)."""
+
+    type: AlertEventType
+    occurred_at: datetime  # wall clock, same timeline as resolved_at / acknowledged_at
+    resolution: str | None = None  # "auto" / "manual" for RESOLVED
+
+
 @dataclass(frozen=True)
 class AlertFilter:
     state: AlertState | None = None

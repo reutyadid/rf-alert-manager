@@ -3,7 +3,7 @@
 import dataclasses
 from datetime import UTC, datetime, timedelta
 
-from alert_service.domain.models import Alert, AlertFilter, AlertState, Contribution
+from alert_service.domain.models import Alert, AlertEvent, AlertFilter, AlertState, Contribution
 
 
 class FakeClock:
@@ -21,10 +21,15 @@ class InMemoryAlertRepository:
     def __init__(self) -> None:
         self.alerts: dict[str, Alert] = {}
         self.contributions: dict[str, list[Contribution]] = {}
+        self.events: list[tuple[str, AlertEvent]] = []  # (alert_id, event): the outbox
 
-    async def create(self, alert: Alert, contributions: list[Contribution]) -> None:
+    async def create(
+        self, alert: Alert, contributions: list[Contribution], event: AlertEvent | None = None
+    ) -> None:
         self.alerts[alert.alert_id] = dataclasses.replace(alert)
         self.contributions[alert.alert_id] = list(contributions)
+        if event is not None:
+            self.events.append((alert.alert_id, event))
 
     async def get(self, alert_id: str) -> Alert | None:
         alert = self.alerts.get(alert_id)
@@ -55,7 +60,12 @@ class InMemoryAlertRepository:
         self.contributions[alert.alert_id].append(contribution)
 
     async def transition(
-        self, alert_id: str, from_states: set[AlertState], to_state: AlertState, at: datetime
+        self,
+        alert_id: str,
+        from_states: set[AlertState],
+        to_state: AlertState,
+        at: datetime,
+        event: AlertEvent | None = None,
     ) -> Alert | None:
         stored = self.alerts.get(alert_id)
         if stored is None or stored.state not in from_states:
@@ -65,6 +75,8 @@ class InMemoryAlertRepository:
             stored.acknowledged_at = at
         if to_state is AlertState.RESOLVED:
             stored.resolved_at = at
+        if event is not None:
+            self.events.append((alert_id, event))
         return dataclasses.replace(stored)
 
     async def query(self, flt: AlertFilter) -> list[Alert]:

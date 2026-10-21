@@ -3,7 +3,7 @@ from pathlib import Path
 
 import asyncpg
 
-from alert_service.domain.models import Alert, AlertFilter, AlertState, Contribution
+from alert_service.domain.models import Alert, AlertEvent, AlertFilter, AlertState, Contribution
 
 SCHEMA_FILE = Path(__file__).resolve().parent.parent / "db" / "schema.sql"
 
@@ -56,7 +56,9 @@ class PostgresAlertRepository:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
-    async def create(self, alert: Alert, contributions: list[Contribution]) -> None:
+    async def create(
+        self, alert: Alert, contributions: list[Contribution], event: AlertEvent | None = None
+    ) -> None:
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 f"INSERT INTO alerts ({_ALERT_COLUMNS}) "
@@ -128,7 +130,12 @@ class PostgresAlertRepository:
             )
 
     async def transition(
-        self, alert_id: str, from_states: set[AlertState], to_state: AlertState, at: datetime
+        self,
+        alert_id: str,
+        from_states: set[AlertState],
+        to_state: AlertState,
+        at: datetime,
+        event: AlertEvent | None = None,
     ) -> Alert | None:
         column = {
             AlertState.ACKNOWLEDGED: "acknowledged_at",

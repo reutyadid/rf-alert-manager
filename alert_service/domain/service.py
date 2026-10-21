@@ -1,11 +1,13 @@
 import asyncio
 import uuid
 from collections import Counter
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from alert_service.domain.errors import AlertNotFound, InvalidTransition
 from alert_service.domain.models import (
     Alert,
+    AlertEvent,
+    AlertEventType,
     AlertFilter,
     AlertState,
     Contribution,
@@ -32,6 +34,7 @@ class AlertService:
         watermark: Watermark,
         freq_tolerance_mhz: float,
         max_clock_skew_s: float,
+        notify: bool = False,
     ) -> None:
         self._repo = repo
         self._clock = clock
@@ -40,6 +43,8 @@ class AlertService:
         self._max_skew = timedelta(seconds=max_clock_skew_s)
         self._pending: dict[str, PendingRun] = {}
         self._lock = asyncio.Lock()
+        # Off: no events, so no outbox rows pile up when no webhook is configured.
+        self._notify = notify
 
     @property
     def pending_run_count(self) -> int:
@@ -105,7 +110,7 @@ class AlertService:
         )
         for c in rest:
             alert.add(c)
-        await self._repo.create(alert, run.contributions)
+        await self._repo.create(alert, run.contributions, self._event(AlertEventType.OPENED))
 
     # --- auto-resolve ----------------------------------------------------------------
 
@@ -121,8 +126,13 @@ class AlertService:
             resolved = []
             for alert in await self._repo.list_active():
                 if watermark - alert.last_seen > timedelta(seconds=alert.resolve_after_s):
+                    now = self._now()
                     done = await self._repo.transition(
-                        alert.alert_id, AlertState.active(), AlertState.RESOLVED, self._now()
+                        alert.alert_id,
+                        AlertState.active(),
+                        AlertState.RESOLVED,
+                        now,
+                        self._event(AlertEventType.RESOLVED, "auto", now),
                     )
                     if done is not None:
                         resolved.append(done)
@@ -144,7 +154,9 @@ class AlertService:
             alert = await self._get(alert_id)
             if alert.state not in AlertState.active():
                 raise InvalidTransition(alert_id, alert.state, "resolve")
-            return await self._transition(alert, AlertState.active(), AlertState.RESOLVED)
+            return await self._transition(
+                alert, AlertState.active(), AlertState.RESOLVED, resolution="manual"
+            )
 
     # --- queries ---------------------------------------------------------------------
 
@@ -168,12 +180,30 @@ class AlertService:
         return alert
 
     async def _transition(
-        self, alert: Alert, from_states: set[AlertState], to_state: AlertState
+        self,
+        alert: Alert,
+        from_states: set[AlertState],
+        to_state: AlertState,
+        resolution: str | None = None,
     ) -> Alert:
-        updated = await self._repo.transition(alert.alert_id, from_states, to_state, self._now())
+        now = self._now()
+        # Only resolve is notified; acknowledge is not (webhooks-design §2).
+        event = (
+            self._event(AlertEventType.RESOLVED, resolution, now)
+            if to_state is AlertState.RESOLVED
+            else None
+        )
+        updated = await self._repo.transition(alert.alert_id, from_states, to_state, now, event)
         if updated is None:  # another instance changed it first
             raise InvalidTransition(alert.alert_id, alert.state, to_state.lower())
         return updated
+
+    def _event(
+        self, type_: AlertEventType, resolution: str | None = None, at: datetime | None = None
+    ) -> AlertEvent | None:
+        if not self._notify:
+            return None
+        return AlertEvent(type_, at or self._now(), resolution)
 
     def _now(self):
         return self._clock.now()
